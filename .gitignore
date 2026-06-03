@@ -9,6 +9,8 @@ lib/javafx-jmods-temp/
 
 # BlueJ files
 *.ctxt
+*.exe
+Main-*.exe
 
 # Mobile Tools for Java (J2ME)
 .mtj.tmp/
