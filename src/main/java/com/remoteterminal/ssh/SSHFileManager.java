@@ -6,6 +6,7 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.function.Consumer;
 
 /**
  * SSH 文件管理器 - 基于SFTP的远程文件操作
@@ -16,6 +17,41 @@ public class SSHFileManager {
 
     public SSHFileManager(SSHConnection sshConn) {
         this.sshConn = sshConn;
+    }
+
+    /** JSch 进度监听器包装，转为百分比回调 */
+    private static class TransferProgress implements SftpProgressMonitor {
+        private final Consumer<Double> callback;
+        private long max;
+        private long lastReportedAt;
+
+        TransferProgress(Consumer<Double> callback) {
+            this.callback = callback;
+        }
+
+        @Override
+        public void init(int op, String src, String dest, long max) {
+            this.max = max;
+            if (callback != null && max <= 0) callback.accept(-1.0); // 未知大小
+        }
+
+        @Override
+        public boolean count(long count) {
+            if (callback != null && max > 0) {
+                double pct = (double) count / max * 100.0;
+                long now = System.currentTimeMillis();
+                if (now - lastReportedAt > 150 || count >= max) {
+                    callback.accept(pct);
+                    lastReportedAt = now;
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public void end() {
+            if (callback != null) callback.accept(100.0);
+        }
     }
 
     /** 列出目录内容（线程安全，防御性处理 JSch 内部解析异常） */
@@ -84,43 +120,73 @@ public class SSHFileManager {
         return parent + (parent.endsWith("/") ? "" : "/") + name;
     }
 
-    /** 下载文件到本地 */
+    /** 下载文件到本地（无进度回调） */
     public void downloadFile(String remotePath, Path localPath) throws Exception {
+        downloadFile(remotePath, localPath, null);
+    }
+
+    /** 下载文件到本地（带进度回调，0-100%） */
+    public void downloadFile(String remotePath, Path localPath, Consumer<Double> progress) throws Exception {
         synchronized (sshConn.getSftpLock()) {
             ChannelSftp sftp = sshConn.openSftpChannel();
-            sftp.get(remotePath, localPath.toString());
+            if (progress != null) {
+                sftp.get(remotePath, localPath.toString(), new TransferProgress(progress));
+            } else {
+                sftp.get(remotePath, localPath.toString());
+            }
         }
     }
 
-    /** 上传文件到远程 */
+    /** 上传文件到远程（无进度回调） */
     public void uploadFile(Path localPath, String remoteDir) throws Exception {
+        uploadFile(localPath, remoteDir, null);
+    }
+
+    /** 上传文件到远程（带进度回调，0-100%） */
+    public void uploadFile(Path localPath, String remoteDir, Consumer<Double> progress) throws Exception {
         synchronized (sshConn.getSftpLock()) {
             ChannelSftp sftp = sshConn.openSftpChannel();
             sftp.cd(remoteDir);
-            sftp.put(localPath.toString(), localPath.getFileName().toString());
+            String destName = localPath.getFileName().toString();
+            if (progress != null) {
+                sftp.put(localPath.toString(), destName, new TransferProgress(progress));
+            } else {
+                sftp.put(localPath.toString(), destName);
+            }
         }
     }
 
-    /** 上传文件夹到远程 */
+    /** 上传文件夹到远程（无进度回调） */
     public void uploadDirectory(Path localDir, String remoteDir) throws Exception {
+        uploadDirectory(localDir, remoteDir, null);
+    }
+
+    /** 上传文件夹到远程（带进度回调，0-100%） */
+    public void uploadDirectory(Path localDir, String remoteDir, Consumer<Double> progress) throws Exception {
         synchronized (sshConn.getSftpLock()) {
             ChannelSftp sftp = sshConn.openSftpChannel();
             String targetDir = remoteDir + "/" + localDir.getFileName().toString();
-            sftp.mkdir(targetDir);
-            uploadDirRecursive(sftp, localDir, targetDir);
+            try { sftp.mkdir(targetDir); } catch (Exception ignored) {}
+            uploadDirRecursive(sftp, localDir, targetDir, progress);
         }
     }
 
-    private void uploadDirRecursive(ChannelSftp sftp, Path localDir, String remoteDir) throws Exception {
+    private void uploadDirRecursive(ChannelSftp sftp, Path localDir, String remoteDir,
+                                    Consumer<Double> progress) throws Exception {
         try (var stream = Files.newDirectoryStream(localDir)) {
             for (Path child : stream) {
                 if (Files.isDirectory(child)) {
                     String subDir = remoteDir + "/" + child.getFileName().toString();
                     try { sftp.mkdir(subDir); } catch (Exception ignored) {}
-                    uploadDirRecursive(sftp, child, subDir);
+                    uploadDirRecursive(sftp, child, subDir, progress);
                 } else {
+                    String childName = child.getFileName().toString();
                     sftp.cd(remoteDir);
-                    sftp.put(child.toString(), child.getFileName().toString());
+                    if (progress != null) {
+                        sftp.put(child.toString(), childName, new TransferProgress(progress));
+                    } else {
+                        sftp.put(child.toString(), childName);
+                    }
                 }
             }
         }

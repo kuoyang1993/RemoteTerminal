@@ -3,6 +3,7 @@
 .idea/
 *.iml
 target/
+lib/javafx-jmods-temp/
 # Log file
 *.log
 

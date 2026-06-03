@@ -6,9 +6,7 @@ import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
-import javafx.scene.input.Clipboard;
-import javafx.scene.input.ClipboardContent;
-import javafx.scene.input.MouseButton;
+import javafx.scene.input.*;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
@@ -22,6 +20,7 @@ import java.util.function.Consumer;
 /**
  * 文件浏览器 - 纯列表视图，点击目录导航，无折叠箭头，无限深度
  * 展示当前目录内容，缩进体现层级
+ * 支持拖拽上传/下载和进度展示
  */
 public class FileBrowserView extends VBox {
 
@@ -39,8 +38,17 @@ public class FileBrowserView extends VBox {
     // 导航锁，防止并发重复导航
     private volatile boolean navigating = false;
 
+    // 传输中标志
+    private volatile boolean transferring = false;
+
     // 回调和元数据
     private Consumer<String> onStatusChange;
+
+    // 进度 UI
+    private final HBox progressPane;
+    private final ProgressBar progressBar;
+    private final Label progressLabel;
+    private final Label progressFileLabel;
 
     // 图标
     private static final String ICON_FOLDER = "\uD83D\uDCC1";
@@ -75,7 +83,20 @@ public class FileBrowserView extends VBox {
         pathLabel.setMaxWidth(Double.MAX_VALUE);
         HBox.setHgrow(pathLabel, Priority.ALWAYS);
 
-        pathBar.getChildren().addAll(homeBtn, upBtn, refreshBtn, new Separator(), pathLabel);
+        // 上传按钮（路径栏右侧）
+        MenuButton uploadBtn = new MenuButton("\u2B06\uFE0F");
+        uploadBtn.setTooltip(new Tooltip("上传到当前目录"));
+        uploadBtn.setStyle("-fx-background-color: #0e639c; -fx-text-fill: white; -fx-font-size: 14px; -fx-padding: 2 8;");
+
+        MenuItem uploadFileItem = new MenuItem("上传文件");
+        uploadFileItem.setOnAction(e -> handleUpload(false));
+
+        MenuItem uploadDirItem = new MenuItem("上传文件夹");
+        uploadDirItem.setOnAction(e -> handleUpload(true));
+
+        uploadBtn.getItems().addAll(uploadFileItem, uploadDirItem);
+
+        pathBar.getChildren().addAll(homeBtn, upBtn, refreshBtn, new Separator(), pathLabel, uploadBtn);
         pathBar.getStyleClass().add("toolbar");
 
         // ---- 文件列表 ----
@@ -94,7 +115,7 @@ public class FileBrowserView extends VBox {
             }
         });
 
-        // 右键空白时也弹出菜单
+        // 右键菜单
         fileListView.setOnContextMenuRequested(e -> {
             FileEntry selected = fileListView.getSelectionModel().getSelectedItem();
             ContextMenu menu = buildFileBrowserContextMenu(selected);
@@ -103,8 +124,161 @@ public class FileBrowserView extends VBox {
             }
         });
 
-        getChildren().addAll(pathBar, fileListView);
+        // ---- 拖拽支持 ----
+        setupDragAndDrop();
+
+        // ---- 进度面板（默认隐藏） ----
+        progressPane = new HBox(8);
+        progressPane.setAlignment(Pos.CENTER_LEFT);
+        progressPane.setPadding(new Insets(6, 10, 6, 10));
+        progressPane.setStyle("-fx-background-color: #2d2d2d; -fx-border-color: #444444; -fx-border-width: 1 0 0 0;");
+        progressPane.setVisible(false);
+        progressPane.setManaged(false);
+
+        progressBar = new ProgressBar(0);
+        progressBar.setPrefWidth(200);
+        progressBar.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(progressBar, Priority.ALWAYS);
+
+        progressLabel = new Label("0%");
+        progressLabel.setStyle("-fx-text-fill: #cccccc; -fx-font-size: 11px; -fx-min-width: 40px;");
+
+        progressFileLabel = new Label("");
+        progressFileLabel.setStyle("-fx-text-fill: #888888; -fx-font-size: 11px;");
+
+        progressPane.getChildren().addAll(progressBar, progressLabel, progressFileLabel);
+
+        getChildren().addAll(pathBar, fileListView, progressPane);
         setDisable(true);
+    }
+
+    // ==================== 拖拽与上传按钮 ====================
+
+    private void setupDragAndDrop() {
+        // 拖拽外部文件到列表 → 上传
+        fileListView.setOnDragOver(e -> {
+            if (e.getDragboard().hasFiles() && currentFM != null && !transferring) {
+                e.acceptTransferModes(TransferMode.COPY);
+            }
+            e.consume();
+        });
+
+        fileListView.setOnDragDropped(e -> {
+            Dragboard db = e.getDragboard();
+            if (db.hasFiles() && currentFM != null) {
+                List<File> files = db.getFiles();
+                if (files != null && !files.isEmpty()) {
+                    uploadFiles(files);
+                }
+            }
+            e.setDropCompleted(true);
+            e.consume();
+        });
+
+        // 拖拽列表文件 → 触发下载
+        fileListView.setOnDragDetected(e -> {
+            FileEntry selected = fileListView.getSelectionModel().getSelectedItem();
+            if (selected != null && currentFM != null && !transferring) {
+                Dragboard db = fileListView.startDragAndDrop(TransferMode.COPY);
+                ClipboardContent content = new ClipboardContent();
+                content.putString(selected.getFullPath());
+                db.setContent(content);
+                // 拖拽远程文件 → 弹出保存对话框下载
+                downloadWithProgress(selected.getFullPath());
+                e.consume();
+            }
+        });
+    }
+
+    /** 上传按钮处理 */
+    private void handleUpload(boolean isDir) {
+        if (currentFM == null) return;
+        if (isDir) {
+            javafx.stage.DirectoryChooser chooser = new javafx.stage.DirectoryChooser();
+            chooser.setTitle("选择要上传的文件夹");
+            File dir = chooser.showDialog(getScene().getWindow());
+            if (dir != null) uploadDirectory(dir.toPath());
+        } else {
+            javafx.stage.FileChooser chooser = new javafx.stage.FileChooser();
+            chooser.setTitle("选择要上传的文件");
+            List<File> files = chooser.showOpenMultipleDialog(getScene().getWindow());
+            if (files != null && !files.isEmpty()) uploadFiles(files);
+        }
+    }
+
+    /** 拖拽批量上传文件 */
+    private void uploadFiles(List<File> files) {
+        if (files == null || files.isEmpty() || currentFM == null) return;
+        if (transferring) {
+            if (onStatusChange != null) onStatusChange.accept("正在传输中，请稍后...");
+            return;
+        }
+        transferring = true;
+        showProgress("准备上传 " + files.size() + " 个项目...");
+
+        new Thread(() -> {
+            int total = files.size();
+            int[] completed = {0};
+            try {
+                for (File f : files) {
+                    Path p = f.toPath();
+                    if (Files.isDirectory(p)) {
+                        Platform.runLater(() -> setProgressFile("上传文件夹: " + p.getFileName()));
+                        currentFM.uploadDirectory(p, currentPath, pct ->
+                            Platform.runLater(() -> setProgress(pct, "上传文件夹 " + p.getFileName()))
+                        );
+                    } else {
+                        Platform.runLater(() -> setProgressFile("上传: " + p.getFileName()));
+                        currentFM.uploadFile(p, currentPath, pct ->
+                            Platform.runLater(() -> setProgress(pct, "上传 " + p.getFileName()))
+                        );
+                    }
+                    completed[0]++;
+                }
+                Platform.runLater(() -> {
+                    hideProgress();
+                    transferring = false;
+                    refresh();
+                    if (onStatusChange != null)
+                        onStatusChange.accept("上传完成: " + completed[0] + "/" + total);
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    hideProgress();
+                    transferring = false;
+                    showError("上传失败: " + e.getMessage());
+                });
+            }
+        }, "DnD-Upload").start();
+    }
+
+    /** 从按钮上传单个文件夹 */
+    private void uploadDirectory(Path localDir) {
+        if (currentFM == null) return;
+        if (transferring) return;
+        transferring = true;
+        String name = localDir.getFileName().toString();
+        showProgress("上传文件夹: " + name);
+
+        new Thread(() -> {
+            try {
+                currentFM.uploadDirectory(localDir, currentPath, pct ->
+                    Platform.runLater(() -> setProgress(pct, "上传 " + name))
+                );
+                Platform.runLater(() -> {
+                    hideProgress();
+                    transferring = false;
+                    refresh();
+                    if (onStatusChange != null) onStatusChange.accept("上传完成: " + name);
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    hideProgress();
+                    transferring = false;
+                    showError("上传失败: " + e.getMessage());
+                });
+            }
+        }, "Upload-Dir").start();
     }
 
     // ==================== 导航 ====================
@@ -363,30 +537,41 @@ public class FileBrowserView extends VBox {
     }
 
     private void uploadToTarget(String remoteDir, boolean isDir) {
+        if (currentFM == null || transferring) return;
+        transferring = true;
+
         if (isDir) {
             javafx.stage.DirectoryChooser chooser = new javafx.stage.DirectoryChooser();
             chooser.setTitle("选择要上传的文件夹");
-            File dir = chooser.showDialog(null);
-            if (dir == null) return;
+            File dir = chooser.showDialog(getScene().getWindow());
+            if (dir == null) { transferring = false; return; }
+            String name = dir.getName();
+            showProgress("上传文件夹: " + name);
             runAsync(() -> {
                 try {
-                    currentFM.uploadDirectory(dir.toPath(), remoteDir);
-                    Platform.runLater(() -> refresh());
+                    currentFM.uploadDirectory(dir.toPath(), remoteDir, pct ->
+                        Platform.runLater(() -> setProgress(pct, "上传 " + name))
+                    );
+                    Platform.runLater(() -> { hideProgress(); transferring = false; refresh(); });
                 } catch (Exception e) {
-                    Platform.runLater(() -> showError("上传失败: " + e.getMessage()));
+                    Platform.runLater(() -> { hideProgress(); transferring = false; showError("上传失败: " + e.getMessage()); });
                 }
             });
         } else {
             javafx.stage.FileChooser chooser = new javafx.stage.FileChooser();
             chooser.setTitle("选择要上传的文件");
-            File file = chooser.showOpenDialog(null);
-            if (file == null) return;
+            File file = chooser.showOpenDialog(getScene().getWindow());
+            if (file == null) { transferring = false; return; }
+            String name = file.getName();
+            showProgress("上传: " + name);
             runAsync(() -> {
                 try {
-                    currentFM.uploadFile(file.toPath(), remoteDir);
-                    Platform.runLater(() -> refresh());
+                    currentFM.uploadFile(file.toPath(), remoteDir, pct ->
+                        Platform.runLater(() -> setProgress(pct, "上传 " + name))
+                    );
+                    Platform.runLater(() -> { hideProgress(); transferring = false; refresh(); });
                 } catch (Exception e) {
-                    Platform.runLater(() -> showError("上传失败: " + e.getMessage()));
+                    Platform.runLater(() -> { hideProgress(); transferring = false; showError("上传失败: " + e.getMessage()); });
                 }
             });
         }
@@ -471,19 +656,38 @@ public class FileBrowserView extends VBox {
     }
 
     private void downloadItem(String path) {
+        downloadWithProgress(path);
+    }
+
+    /** 带进度条的下载 */
+    private void downloadWithProgress(String remotePath) {
+        if (currentFM == null || transferring) return;
         javafx.stage.DirectoryChooser chooser = new javafx.stage.DirectoryChooser();
         chooser.setTitle("选择下载位置");
-        File dir = chooser.showDialog(null);
+        File dir = chooser.showDialog(getScene().getWindow());
         if (dir == null) return;
+
+        String fileName = new File(remotePath).getName();
+        transferring = true;
+        showProgress("下载: " + fileName);
+
         runAsync(() -> {
             try {
-                Path localPath = dir.toPath().resolve(new File(path).getName());
-                currentFM.downloadFile(path, localPath);
+                Path localPath = dir.toPath().resolve(fileName);
+                currentFM.downloadFile(remotePath, localPath, pct ->
+                    Platform.runLater(() -> setProgress(pct, "下载 " + fileName))
+                );
                 Platform.runLater(() -> {
+                    hideProgress();
+                    transferring = false;
                     if (onStatusChange != null) onStatusChange.accept("已下载到: " + localPath);
                 });
             } catch (Exception e) {
-                Platform.runLater(() -> showError("下载失败: " + e.getMessage()));
+                Platform.runLater(() -> {
+                    hideProgress();
+                    transferring = false;
+                    showError("下载失败: " + e.getMessage());
+                });
             }
         });
     }
@@ -522,6 +726,34 @@ public class FileBrowserView extends VBox {
         alert.setTitle("操作失败");
         alert.setContentText(msg);
         alert.showAndWait();
+    }
+
+    // ==================== 进度 UI ====================
+
+    private void showProgress(String desc) {
+        progressPane.setVisible(true);
+        progressPane.setManaged(true);
+        progressBar.setProgress(0);
+        progressLabel.setText("0%");
+        progressFileLabel.setText(desc);
+    }
+
+    private void setProgress(double pct, String desc) {
+        progressBar.setProgress(pct / 100.0);
+        progressLabel.setText(String.format("%.0f%%", pct));
+        progressFileLabel.setText(desc);
+    }
+
+    private void setProgressFile(String desc) {
+        progressFileLabel.setText(desc);
+    }
+
+    private void hideProgress() {
+        progressPane.setVisible(false);
+        progressPane.setManaged(false);
+        progressBar.setProgress(0);
+        progressLabel.setText("0%");
+        progressFileLabel.setText("");
     }
 
     // ==================== 内部类 ====================

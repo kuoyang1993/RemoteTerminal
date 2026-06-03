@@ -6,7 +6,9 @@ import com.remoteterminal.ssh.SSHConnection;
 import com.remoteterminal.ssh.SSHFileManager;
 import com.remoteterminal.ssh.SSHTerminal;
 import javafx.application.Platform;
+import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
+import javafx.geometry.Pos;
 import javafx.scene.control.*;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCodeCombination;
@@ -513,7 +515,25 @@ public class MainLayout extends BorderPane {
                 - 不限目录深度，可浏览任意层级
                 """);
         welcomeLabel.setStyle("-fx-text-fill: #cccccc; -fx-font-size: 13px; -fx-padding: 30px; -fx-line-spacing: 6px;");
-        welcomeTab.setContent(welcomeLabel);
+
+        // 关闭按钮
+        Button closeBtn = new Button("✕");
+        String closeBtnBase = "-fx-background-color: transparent; -fx-text-fill: #999999; -fx-font-size: 16px; -fx-cursor: hand; -fx-padding: 4 8;";
+        String closeBtnHover = "-fx-background-color: #484848; -fx-text-fill: #ffffff; -fx-font-size: 16px; -fx-cursor: hand; -fx-padding: 4 8;";
+        closeBtn.setStyle(closeBtnBase);
+        closeBtn.setOnMouseEntered(e -> closeBtn.setStyle(closeBtnHover));
+        closeBtn.setOnMouseExited(e -> closeBtn.setStyle(closeBtnBase));
+        closeBtn.setOnAction(e -> terminalTabPane.getTabs().remove(welcomeTab));
+
+        HBox topBar = new HBox(closeBtn);
+        topBar.setAlignment(Pos.TOP_RIGHT);
+        topBar.setPadding(new Insets(8, 12, 0, 0));
+
+        BorderPane content = new BorderPane();
+        content.setCenter(welcomeLabel);
+        content.setTop(topBar);
+
+        welcomeTab.setContent(content);
         welcomeTab.setClosable(false);
         return welcomeTab;
     }
