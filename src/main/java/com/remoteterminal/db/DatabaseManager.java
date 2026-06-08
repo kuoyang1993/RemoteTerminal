@@ -5,6 +5,7 @@ import com.zaxxer.hikari.HikariDataSource;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.Statement;
 
 /**
@@ -56,22 +57,35 @@ public final class DatabaseManager {
     }
 
     private void initDatabase() {
-        String sql = """
+        // 先创建表（如果是全新数据库）
+        String createSql = """
                 CREATE TABLE IF NOT EXISTS connections (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     name VARCHAR(255) NOT NULL,
                     host VARCHAR(255) NOT NULL,
                     port INT DEFAULT 22,
                     username VARCHAR(255) NOT NULL,
-                    password VARCHAR(512),
-                    auto_connect BOOLEAN DEFAULT FALSE,
+                    password VARCHAR(1024),
+                    save_password BOOLEAN DEFAULT FALSE,
                     sort_order INT DEFAULT 0
                 )
                 """;
 
         try (Connection conn = getConnection();
              Statement stmt = conn.createStatement()) {
-            stmt.execute(sql);
+            stmt.execute(createSql);
+
+            // 迁移：旧字段 auto_connect → save_password
+            try (ResultSet rs = conn.getMetaData().getColumns(null, null, "CONNECTIONS", "AUTO_CONNECT")) {
+                if (rs.next()) {
+                    // 旧字段存在，执行迁移
+                    stmt.execute("ALTER TABLE connections ADD COLUMN IF NOT EXISTS save_password BOOLEAN DEFAULT FALSE");
+                    stmt.execute("UPDATE connections SET save_password = auto_connect WHERE save_password IS NULL OR save_password = FALSE");
+                    stmt.execute("ALTER TABLE connections ALTER COLUMN password VARCHAR(1024)");
+                }
+            } catch (Exception ignored) {
+                // 迁移失败不影响启动
+            }
         } catch (Exception e) {
             throw new RuntimeException("数据库初始化失败", e);
         }

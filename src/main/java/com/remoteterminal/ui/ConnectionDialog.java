@@ -8,6 +8,7 @@ import javafx.scene.layout.GridPane;
 
 /**
  * 新建/编辑连接对话框
+ * 会话信息永久留存，密码可选加密存储
  */
 public class ConnectionDialog extends Dialog<ConnectionDialog.DialogResult> {
 
@@ -16,10 +17,8 @@ public class ConnectionDialog extends Dialog<ConnectionDialog.DialogResult> {
     private final TextField portField = new TextField("22");
     private final TextField usernameField = new TextField();
     private final PasswordField passwordField = new PasswordField();
-    private final CheckBox saveConnection = new CheckBox("保存连接（下次打开可直接连接）");
-    private final CheckBox autoConnect = new CheckBox("启动时自动连接");
-    private final ButtonType connectBtnType = new ButtonType("保存并连接", ButtonBar.ButtonData.OK_DONE);
-    private final ButtonType connectOnlyBtnType = new ButtonType("直接连接", ButtonBar.ButtonData.OK_DONE);
+    private final CheckBox savePasswordCb = new CheckBox("保存密码（加密存储，双击列表可自动登录）");
+    private final ButtonType saveAndConnectBtnType = new ButtonType("保存并连接", ButtonBar.ButtonData.OK_DONE);
     private final ButtonType saveBtnType = new ButtonType("仅保存", ButtonBar.ButtonData.APPLY);
     private final ButtonType cancelBtnType = new ButtonType("取消", ButtonBar.ButtonData.CANCEL_CLOSE);
 
@@ -38,28 +37,21 @@ public class ConnectionDialog extends Dialog<ConnectionDialog.DialogResult> {
             hostField.setText(existing.host() != null ? existing.host() : "");
             portField.setText(String.valueOf(existing.port()));
             usernameField.setText(existing.username() != null ? existing.username() : "");
-            passwordField.setText(existing.password() != null ? existing.password() : "");
-            saveConnection.setSelected(true);
-            autoConnect.setSelected(existing.autoConnect());
+            if (existing.hasPassword()) {
+                passwordField.setText(existing.password());
+                savePasswordCb.setSelected(true);
+            }
         }
 
         GridPane grid = createFormGrid();
         getDialogPane().setContent(grid);
-        getDialogPane().getButtonTypes().addAll(connectBtnType, connectOnlyBtnType, saveBtnType, cancelBtnType);
+        getDialogPane().getButtonTypes().addAll(saveAndConnectBtnType, saveBtnType, cancelBtnType);
 
-        // autoConnect 依赖 saveConnection
-        autoConnect.disableProperty().bind(saveConnection.selectedProperty().not());
-        saveConnection.selectedProperty().addListener((obs, old, val) -> {
-            if (!val) autoConnect.setSelected(false);
-        });
-
-        // 结果转换 - 在此进行验证和保存
+        // 结果转换
         setResultConverter(btnType -> {
             if (btnType == cancelBtnType) return null;
-            connectNow = (btnType == connectBtnType || btnType == connectOnlyBtnType);
-            boolean shouldSave = (btnType == connectBtnType || btnType == saveBtnType) && saveConnection.isSelected();
+            connectNow = (btnType == saveAndConnectBtnType);
 
-            // 验证
             String error = validateInput();
             if (error != null) {
                 javafx.application.Platform.runLater(() -> showError(error));
@@ -67,32 +59,26 @@ public class ConnectionDialog extends Dialog<ConnectionDialog.DialogResult> {
             }
 
             ConnectionInfo info = buildConnection();
-            if (shouldSave) {
-                // 保存到数据库
-                try {
-                    ConnectionDAO dao = new ConnectionDAO();
-                    if (editingInfo != null && editingInfo.isPersisted()) {
-                        dao.update(info);
-                    } else {
-                        info = dao.save(info);
-                    }
-                    return new DialogResult(info, connectNow);
-                } catch (Exception ex) {
-                    javafx.application.Platform.runLater(() -> {
-                        Alert alert = new Alert(Alert.AlertType.ERROR);
-                        alert.setTitle("保存失败");
-                        alert.setContentText("保存连接信息失败: " + ex.getMessage());
-                        alert.showAndWait();
-                    });
-                    return null;
+            // 会话信息始终存入数据库
+            try {
+                ConnectionDAO dao = new ConnectionDAO();
+                if (editingInfo != null && editingInfo.isPersisted()) {
+                    dao.update(info);
+                } else {
+                    info = dao.save(info);
                 }
-            } else {
-                // 不保存，直接返回（id=0 表示临时连接）
                 return new DialogResult(info, connectNow);
+            } catch (Exception ex) {
+                javafx.application.Platform.runLater(() -> {
+                    Alert alert = new Alert(Alert.AlertType.ERROR);
+                    alert.setTitle("保存失败");
+                    alert.setContentText("保存连接信息失败: " + ex.getMessage());
+                    alert.showAndWait();
+                });
+                return null;
             }
         });
 
-        // 初始聚焦
         nameField.requestFocus();
     }
 
@@ -122,8 +108,8 @@ public class ConnectionDialog extends Dialog<ConnectionDialog.DialogResult> {
         grid.add(new Label("密码:"), 0, 4);
         grid.add(passwordField, 1, 4);
 
-        grid.add(saveConnection, 1, 5);
-        grid.add(autoConnect, 1, 6);
+        grid.add(savePasswordCb, 1, 5);
+        GridPane.setMargin(savePasswordCb, new Insets(4, 0, 0, 0));
 
         return grid;
     }
@@ -164,12 +150,14 @@ public class ConnectionDialog extends Dialog<ConnectionDialog.DialogResult> {
         int port = Integer.parseInt(portField.getText().trim());
         String user = usernameField.getText().trim();
         String pass = passwordField.getText();
-        boolean auto = saveConnection.isSelected() && autoConnect.isSelected();
+        boolean savePwd = savePasswordCb.isSelected();
 
-        if (editingInfo != null && editingInfo.id() != null) {
-            return new ConnectionInfo(editingInfo.id(), name, host, port, user, pass, auto, 0);
+        if (editingInfo != null && editingInfo.id() != null && editingInfo.id() > 0) {
+            return new ConnectionInfo(editingInfo.id(), name, host, port, user,
+                    savePwd ? pass : "", savePwd, 0);
         } else {
-            return new ConnectionInfo(name, host, port, user, pass, auto);
+            return new ConnectionInfo(name, host, port, user,
+                    savePwd ? pass : "", savePwd);
         }
     }
 

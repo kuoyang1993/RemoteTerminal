@@ -1,18 +1,15 @@
 package com.remoteterminal;
 
-import com.remoteterminal.db.ConnectionDAO;
 import com.remoteterminal.db.DatabaseManager;
-import com.remoteterminal.model.ConnectionInfo;
 import com.remoteterminal.ui.MainLayout;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Scene;
+import javafx.scene.SceneAntialiasing;
 import javafx.stage.Stage;
 
-import java.util.List;
-
 /**
- * JavaFX 应用程序主类
+ * JavaFX 应用程序主类 — 标准窗口，禁用抗锯齿，固定尺寸
  */
 public class App extends Application {
 
@@ -26,7 +23,8 @@ public class App extends Application {
         // 创建主界面
         mainLayout = new MainLayout();
 
-        Scene scene = new Scene(mainLayout, 1280, 800);
+        // 禁用抗锯齿 + 固定 1280x800（无透明、无特效、稳如磐石）
+        Scene scene = new Scene(mainLayout, 1280, 800, false, SceneAntialiasing.DISABLED);
         scene.getStylesheets().add(
                 getClass().getResource("/com/remoteterminal/styles.css").toExternalForm()
         );
@@ -42,25 +40,6 @@ public class App extends Application {
         });
 
         primaryStage.show();
-
-        // 自动连接已保存的连接
-        autoConnect();
-    }
-
-    private void autoConnect() {
-        new Thread(() -> {
-            try {
-                ConnectionDAO dao = new ConnectionDAO();
-                List<ConnectionInfo> autoList = dao.findAutoConnect();
-                for (ConnectionInfo info : autoList) {
-                    Platform.runLater(() -> mainLayout.connectTo(info));
-                    Thread.sleep(500); // 错开连接
-                }
-            } catch (Exception e) {
-                // 自动连接失败不影响主界面
-                e.printStackTrace();
-            }
-        }, "AutoConnect").start();
     }
 
     @Override

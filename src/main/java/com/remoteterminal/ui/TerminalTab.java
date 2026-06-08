@@ -267,16 +267,18 @@ public class TerminalTab extends Tab {
         writeToTerminal("\r\n\u001b[1;31m[错误] " + msg + "\u001b[0m\r\n");
     }
 
-    /** 发送输入到SSH */
+    /** 发送输入到SSH — 子线程执行，避免网络拥塞阻塞 UI 渲染 */
     void sendToSSH(String data) {
         if (locked) return;
-        if (terminal != null && terminal.isRunning()) {
+        if (terminal == null || !terminal.isRunning()) return;
+        // SSH 写入移出主线程，保证界面流畅
+        new Thread(() -> {
             terminal.send(data);
-        }
-        // 通知监听器（用于同步输入广播）
-        if (inputListener != null) {
-            inputListener.accept(data);
-        }
+            // 同步输入广播（同样在子线程中通知）
+            if (inputListener != null) {
+                inputListener.accept(data);
+            }
+        }, "SSH-Send").start();
     }
 
     public void setOnInput(java.util.function.Consumer<String> listener) {
@@ -309,13 +311,11 @@ public class TerminalTab extends Tab {
         }
     }
 
-    /** 从剪贴板粘贴 - 只发送到SSH，由远程回显负责显示，避免双重写入 */
+    /** 从剪贴板粘贴 — 读剪贴板必须在主线程，写 SSH 通过 sendToSSH 走子线程 */
     private void pasteFromClipboard() {
         String text = Clipboard.getSystemClipboard().getString();
         if (text != null && !text.isEmpty()) {
-            if (terminal != null && terminal.isRunning()) {
-                terminal.send(text);
-            }
+            sendToSSH(text);
         }
     }
 

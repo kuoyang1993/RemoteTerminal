@@ -6,7 +6,6 @@ import com.remoteterminal.ssh.SSHConnection;
 import com.remoteterminal.ssh.SSHFileManager;
 import com.remoteterminal.ssh.SSHTerminal;
 import javafx.application.Platform;
-import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
@@ -386,22 +385,6 @@ public class MainLayout extends BorderPane {
         Label fileOpsLabel = new Label("操作: ");
         fileOpsLabel.setStyle("-fx-text-fill: #999999; -fx-font-size: 11px;");
 
-        Button homeBtn = new Button("\uD83C\uDFE0 根目录");
-        homeBtn.setOnAction(e -> fileBrowser.navigateTo("/"));
-
-        Button upBtn = new Button("\u2B06 上级");
-        upBtn.setOnAction(e -> {
-            String path = fileBrowser.getCurrentPath();
-            if (path != null && !"/".equals(path)) {
-                int idx = path.lastIndexOf('/');
-                String parent = idx <= 0 ? "/" : path.substring(0, idx);
-                fileBrowser.navigateTo(parent);
-            }
-        });
-
-        Button refreshBtn = new Button("↻ 刷新");
-        refreshBtn.setOnAction(e -> fileBrowser.refresh());
-
         Button newFolderBtn = new Button("📁+");
         newFolderBtn.setTooltip(new Tooltip("新建文件夹"));
         newFolderBtn.setOnAction(e -> {
@@ -462,40 +445,28 @@ public class MainLayout extends BorderPane {
             });
         });
 
-        Button uploadBtn = new Button("⬆ 上传");
-        uploadBtn.setTooltip(new Tooltip("上传文件到当前目录"));
-        uploadBtn.setOnAction(e -> {
-            Long connId = fileBrowser.getCurrentConnId();
-            if (connId == null) {
-                setStatus("请先连接服务器");
-                return;
-            }
-            javafx.stage.FileChooser chooser = new javafx.stage.FileChooser();
-            chooser.setTitle("选择要上传的文件");
-            java.io.File file = chooser.showOpenDialog(null);
-            if (file == null) return;
-            new Thread(() -> {
-                try {
-                    SSHFileManager fm = getFileManager(connId);
-                    if (fm == null) return;
-                    fm.uploadFile(file.toPath(), fileBrowser.getCurrentPath());
-                    Platform.runLater(() -> {
-                        setStatus("已上传: " + file.getName());
-                        fileBrowser.refresh();
-                    });
-                } catch (Exception ex) {
-                    Platform.runLater(() -> setStatus("上传失败: " + ex.getMessage()));
-                }
-            }, "ToolbarUpload").start();
-        });
-
-        toolbar.getItems().addAll(fileOpsLabel, homeBtn, upBtn, refreshBtn,
-                newFolderBtn, newFileBtn, uploadBtn);
+        toolbar.getItems().addAll(fileOpsLabel, newFolderBtn, newFileBtn);
         return toolbar;
     }
 
     private Tab createWelcomeTab() {
-        Tab welcomeTab = new Tab("欢迎");
+        Tab welcomeTab = new Tab();
+        welcomeTab.setClosable(false);
+
+        // 标签头：欢迎 + 关闭按钮
+        Label tabTitle = new Label("欢迎");
+        tabTitle.setStyle("-fx-text-fill: #cccccc;");
+        Button closeBtn = new Button("✕");
+        String closeBtnBase = "-fx-background-color: transparent; -fx-text-fill: #999999; -fx-font-size: 13px; -fx-padding: 0 4;";
+        String closeBtnHover = "-fx-background-color: #484848; -fx-text-fill: #ffffff; -fx-font-size: 13px; -fx-padding: 0 4;";
+        closeBtn.setStyle(closeBtnBase);
+        closeBtn.setOnMouseEntered(e -> closeBtn.setStyle(closeBtnHover));
+        closeBtn.setOnMouseExited(e -> closeBtn.setStyle(closeBtnBase));
+        closeBtn.setOnAction(e -> terminalTabPane.getTabs().remove(welcomeTab));
+        HBox tabHeader = new HBox(4, tabTitle, closeBtn);
+        tabHeader.setAlignment(Pos.CENTER_LEFT);
+        welcomeTab.setGraphic(tabHeader);
+
         Label welcomeLabel = new Label("""
                 欢迎使用 RemoteTerminal 远程终端工具
                                 
@@ -515,26 +486,7 @@ public class MainLayout extends BorderPane {
                 - 不限目录深度，可浏览任意层级
                 """);
         welcomeLabel.setStyle("-fx-text-fill: #cccccc; -fx-font-size: 13px; -fx-padding: 30px; -fx-line-spacing: 6px;");
-
-        // 关闭按钮
-        Button closeBtn = new Button("✕");
-        String closeBtnBase = "-fx-background-color: transparent; -fx-text-fill: #999999; -fx-font-size: 16px; -fx-cursor: hand; -fx-padding: 4 8;";
-        String closeBtnHover = "-fx-background-color: #484848; -fx-text-fill: #ffffff; -fx-font-size: 16px; -fx-cursor: hand; -fx-padding: 4 8;";
-        closeBtn.setStyle(closeBtnBase);
-        closeBtn.setOnMouseEntered(e -> closeBtn.setStyle(closeBtnHover));
-        closeBtn.setOnMouseExited(e -> closeBtn.setStyle(closeBtnBase));
-        closeBtn.setOnAction(e -> terminalTabPane.getTabs().remove(welcomeTab));
-
-        HBox topBar = new HBox(closeBtn);
-        topBar.setAlignment(Pos.TOP_RIGHT);
-        topBar.setPadding(new Insets(8, 12, 0, 0));
-
-        BorderPane content = new BorderPane();
-        content.setCenter(welcomeLabel);
-        content.setTop(topBar);
-
-        welcomeTab.setContent(content);
-        welcomeTab.setClosable(false);
+        welcomeTab.setContent(welcomeLabel);
         return welcomeTab;
     }
 

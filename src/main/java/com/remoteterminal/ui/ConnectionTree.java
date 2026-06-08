@@ -43,7 +43,7 @@ public class ConnectionTree extends TreeView<String> {
         setRoot(rootItem);
         setShowRoot(true);
 
-        // 双击连接节点 → 连接
+        // 双击连接节点 → 有密码则直连，无密码则弹框输入
         setOnMouseClicked(e -> {
             if (e.getButton() == MouseButton.PRIMARY) {
                 TreeItem<String> selected = getSelectionModel().getSelectedItem();
@@ -56,7 +56,15 @@ public class ConnectionTree extends TreeView<String> {
                         Long connId = findConnectionId(item);
                         if (connId != null) {
                             try {
-                                dao.findById(connId).ifPresent(mainLayout::connectTo);
+                                dao.findById(connId).ifPresent(info -> {
+                                    if (info.hasPassword()) {
+                                        // 已存密码，直接登录
+                                        mainLayout.connectTo(info);
+                                    } else {
+                                        // 未存密码，弹出密码输入框
+                                        showPasswordPrompt(info);
+                                    }
+                                });
                             } catch (Exception ignored) {}
                         }
                     }
@@ -173,21 +181,23 @@ public class ConnectionTree extends TreeView<String> {
 
     // ==================== 刷新 ====================
 
-    /** 完全刷新连接列表 */
+    /** 完全刷新连接列表 — DB 查询在子线程执行，UI 更新回到主线程 */
     public void refresh() {
-        Platform.runLater(() -> {
-            // 保留现有的 connectionNodes，只重建UI
-            rootItem.getChildren().clear();
-            nodeConnectionMap.clear();
-            // 重新加载所有连接
+        new Thread(() -> {
+            List<ConnectionInfo> connections;
             try {
-                List<ConnectionInfo> connections = dao.findAll();
-                // 保留现有 connectionNodes 中的节点信息
+                connections = dao.findAll();
+            } catch (Exception e) {
+                Platform.runLater(() -> mainLayout.setStatus("刷新失败: " + e.getMessage()));
+                return;
+            }
+            // 所有 UI 操作回到主线程
+            Platform.runLater(() -> {
+                rootItem.getChildren().clear();
+                nodeConnectionMap.clear();
                 for (ConnectionInfo info : connections) {
-                    // 检查是否已有节点在 connectionNodes 中
                     TreeItem<String> existing = connectionNodes.get(info.id());
                     if (existing != null) {
-                        // 重建：更新显示文本（可能有重命名）
                         String currentLabel = existing.getValue();
                         if (currentLabel != null) {
                             String prefix = currentLabel.startsWith(ICON_CONNECTED) ? ICON_CONNECTED : ICON_DISCONNECTED;
@@ -199,9 +209,33 @@ public class ConnectionTree extends TreeView<String> {
                         addConnectionNode(info);
                     }
                 }
-            } catch (Exception e) {
-                Platform.runLater(() -> mainLayout.setStatus("刷新失败: " + e.getMessage()));
-            }
+            });
+        }, "RefreshConnections").start();
+    }
+
+    // ==================== 密码提示 ====================
+
+    /** 未存密码的连接双击时弹出密码输入框 */
+    private void showPasswordPrompt(ConnectionInfo info) {
+        javafx.scene.control.PasswordField pwdField = new javafx.scene.control.PasswordField();
+        javafx.scene.control.Dialog<String> pwdDialog = new javafx.scene.control.Dialog<>();
+        pwdDialog.setTitle("输入密码");
+        pwdDialog.setHeaderText("连接 " + info.name() + " (" + info.username() + "@" + info.host() + ")");
+        pwdDialog.getDialogPane().setContent(new javafx.scene.layout.VBox(8,
+                new javafx.scene.control.Label("请输入密码:"), pwdField));
+        pwdDialog.getDialogPane().getButtonTypes().addAll(
+                new javafx.scene.control.ButtonType("连接", javafx.scene.control.ButtonBar.ButtonData.OK_DONE),
+                javafx.scene.control.ButtonType.CANCEL);
+        pwdDialog.setResultConverter(bt -> {
+            if (bt.getButtonData() == javafx.scene.control.ButtonBar.ButtonData.CANCEL_CLOSE) return null;
+            String pwd = pwdField.getText();
+            return (pwd != null && !pwd.isEmpty()) ? pwd : null;
+        });
+        pwdDialog.showAndWait().ifPresent(password -> {
+            ConnectionInfo withPwd = new ConnectionInfo(
+                    info.id(), info.name(), info.host(), info.port(),
+                    info.username(), password, info.savePassword(), info.sortOrder());
+            mainLayout.connectTo(withPwd);
         });
     }
 

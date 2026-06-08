@@ -1,4 +1,4 @@
-/* 全局样式 */
+/* 全局 — 无特效，无圆角，稳如磐石 */
 .root {
     -fx-font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
     -fx-font-size: 13px;
@@ -31,8 +31,16 @@
     -fx-text-fill: #cccccc;
 }
 
+.menu-item {
+    -fx-padding: 4 20 4 20;
+}
+
 .menu-item .label {
     -fx-text-fill: #333333;
+}
+
+.menu-item:hover {
+    -fx-background-color: #e0e0e0;
 }
 
 .check-menu-item .label {
@@ -50,7 +58,6 @@
     -fx-background-color: transparent;
     -fx-text-fill: #cccccc;
     -fx-padding: 4 10 4 10;
-    -fx-cursor: hand;
 }
 
 .toolbar .button:hover {
@@ -70,52 +77,41 @@
 /* 树形视图 */
 .tree-view {
     -fx-background-color: #252526;
-    -fx-text-fill: #cccccc;
 }
 
-.tree-view .tree-cell {
+.tree-cell {
     -fx-background-color: #252526;
     -fx-text-fill: #cccccc;
     -fx-padding: 3 6 3 6;
 }
 
-.tree-view .tree-cell:selected {
+.tree-cell:selected {
     -fx-background-color: #094771;
     -fx-text-fill: #ffffff;
 }
 
-.tree-view .tree-cell:hover {
+.tree-cell:hover {
     -fx-background-color: #2a2d2e;
-}
-
-.tree-view .tree-cell:filled:hover:selected {
-    -fx-background-color: #094771;
 }
 
 /* 列表视图 (文件浏览器) */
 .list-view {
     -fx-background-color: #252526;
-    -fx-text-fill: #cccccc;
 }
 
-.list-view .list-cell {
+.list-cell {
     -fx-background-color: #252526;
     -fx-text-fill: #cccccc;
     -fx-padding: 1 6 1 6;
-    -fx-font-size: 13px;
 }
 
-.list-view .list-cell:selected {
+.list-cell:selected {
     -fx-background-color: #094771;
     -fx-text-fill: #ffffff;
 }
 
-.list-view .list-cell:hover {
+.list-cell:hover {
     -fx-background-color: #2a2d2e;
-}
-
-.list-view .list-cell:filled:hover:selected {
-    -fx-background-color: #094771;
 }
 
 /* 状态栏 */
@@ -138,36 +134,33 @@
     -fx-background-color: #2d2d2d;
 }
 
-.tab-pane .tab {
+.tab {
     -fx-background-color: #2d2d2d;
     -fx-padding: 6 12 6 12;
-    -fx-background-radius: 0;
 }
 
-.tab-pane .tab:selected {
+.tab:selected {
     -fx-background-color: #1e1e1e;
 }
 
-.tab-pane .tab .tab-label {
+.tab .tab-label {
     -fx-text-fill: #cccccc;
 }
 
-.tab-pane .tab:selected .tab-label {
+.tab:selected .tab-label {
     -fx-text-fill: #ffffff;
 }
 
-/* Tab 关闭按钮 - 确保 X 可见 */
-.tab-pane .tab-close-button {
+.tab-close-button {
     -fx-background-color: #666666;
-    -fx-background-radius: 2;
     -fx-padding: 4;
 }
 
-.tab-pane .tab .tab-close-button:hover {
+.tab-close-button:hover {
     -fx-background-color: #e81123;
 }
 
-.tab-pane .tab:selected .tab-close-button {
+.tab:selected .tab-close-button {
     -fx-background-color: #888888;
 }
 
@@ -195,27 +188,10 @@
     -fx-progress-color: #007acc;
 }
 
-/* 右键菜单 */
+/* 右键菜单 — 无阴影 */
 .context-menu {
     -fx-background-color: #ffffff;
-    -fx-effect: dropshadow(three-pass-box, rgba(0,0,0,0.3), 10, 0, 0, 3);
     -fx-padding: 4 0 4 0;
-}
-
-.menu-item {
-    -fx-padding: 4 20 4 20;
-}
-
-.menu-item .label {
-    -fx-text-fill: #333333;
-}
-
-.menu-item:hover {
-    -fx-background-color: #e0e0e0;
-}
-
-.menu-item:focused {
-    -fx-background-color: #e0e0e0;
 }
 
 .separator .line {
@@ -229,11 +205,6 @@
 
 .scroll-bar .thumb {
     -fx-background-color: #424242;
-    -fx-background-radius: 3;
-}
-
-.scroll-bar .thumb:hover {
-    -fx-background-color: #555555;
 }
 
 .scroll-bar .track {
@@ -245,27 +216,17 @@
     -fx-background-color: transparent;
 }
 
-/* 文本输入框（对话框内） */
+/* 文本输入框 — 无圆角 */
 .text-field {
     -fx-background-color: #ffffff;
     -fx-border-color: #cccccc;
-    -fx-border-radius: 2;
     -fx-padding: 4 8 4 8;
-}
-
-.text-field:focused {
-    -fx-border-color: #007acc;
 }
 
 .password-field {
     -fx-background-color: #ffffff;
     -fx-border-color: #cccccc;
-    -fx-border-radius: 2;
     -fx-padding: 4 8 4 8;
-}
-
-.password-field:focused {
-    -fx-border-color: #007acc;
 }
 
 .check-box {

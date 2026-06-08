@@ -1,6 +1,7 @@
 package com.remoteterminal.db;
 
 import com.remoteterminal.model.ConnectionInfo;
+import com.remoteterminal.util.EncryptionUtil;
 
 import java.sql.*;
 import java.util.ArrayList;
@@ -8,7 +9,7 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * 连接信息数据访问对象
+ * 连接信息数据访问对象 — 密码加密存储，save_password 控制是否存密码
  */
 public class ConnectionDAO {
 
@@ -18,10 +19,10 @@ public class ConnectionDAO {
         this.db = DatabaseManager.getInstance();
     }
 
-    /** 保存新连接 */
+    /** 保存新连接 — 密码加密存储 */
     public ConnectionInfo save(ConnectionInfo info) throws Exception {
         String sql = """
-                INSERT INTO connections (name, host, port, username, password, auto_connect, sort_order)
+                INSERT INTO connections (name, host, port, username, password, save_password, sort_order)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """;
 
@@ -31,8 +32,8 @@ public class ConnectionDAO {
             ps.setString(2, info.host());
             ps.setInt(3, info.port());
             ps.setString(4, info.username());
-            ps.setString(5, info.password());
-            ps.setBoolean(6, info.autoConnect());
+            ps.setString(5, info.savePassword() ? EncryptionUtil.encrypt(info.password()) : "");
+            ps.setBoolean(6, info.savePassword());
             ps.setInt(7, info.sortOrder());
             ps.executeUpdate();
 
@@ -40,7 +41,7 @@ public class ConnectionDAO {
                 if (rs.next()) {
                     long id = rs.getLong(1);
                     return new ConnectionInfo(id, info.name(), info.host(), info.port(),
-                            info.username(), info.password(), info.autoConnect(), info.sortOrder());
+                            info.username(), info.password(), info.savePassword(), info.sortOrder());
                 }
             }
         }
@@ -51,7 +52,7 @@ public class ConnectionDAO {
     public void update(ConnectionInfo info) throws Exception {
         String sql = """
                 UPDATE connections SET name=?, host=?, port=?, username=?,
-                       password=?, auto_connect=?, sort_order=?
+                       password=?, save_password=?, sort_order=?
                 WHERE id=?
                 """;
 
@@ -61,8 +62,8 @@ public class ConnectionDAO {
             ps.setString(2, info.host());
             ps.setInt(3, info.port());
             ps.setString(4, info.username());
-            ps.setString(5, info.password());
-            ps.setBoolean(6, info.autoConnect());
+            ps.setString(5, info.savePassword() ? EncryptionUtil.encrypt(info.password()) : "");
+            ps.setBoolean(6, info.savePassword());
             ps.setInt(7, info.sortOrder());
             ps.setLong(8, info.id());
             ps.executeUpdate();
@@ -78,7 +79,7 @@ public class ConnectionDAO {
         }
     }
 
-    /** 查询所有连接 */
+    /** 查询所有连接 — 仅已保存密码的返回密码明文，其余密码为空 */
     public List<ConnectionInfo> findAll() throws Exception {
         List<ConnectionInfo> list = new ArrayList<>();
         String sql = "SELECT * FROM connections ORDER BY sort_order, id";
@@ -109,10 +110,10 @@ public class ConnectionDAO {
         return Optional.empty();
     }
 
-    /** 查询所有自动连接的连接 */
-    public List<ConnectionInfo> findAutoConnect() throws Exception {
+    /** 查询所有已保存密码的连接（原 auto_connect 逻辑） */
+    public List<ConnectionInfo> findSavedPassword() throws Exception {
         List<ConnectionInfo> list = new ArrayList<>();
-        String sql = "SELECT * FROM connections WHERE auto_connect=TRUE ORDER BY sort_order, id";
+        String sql = "SELECT * FROM connections WHERE save_password=TRUE ORDER BY sort_order, id";
 
         try (Connection conn = db.getConnection();
              Statement stmt = conn.createStatement();
@@ -125,15 +126,21 @@ public class ConnectionDAO {
     }
 
     private ConnectionInfo mapRow(ResultSet rs) throws SQLException {
-        return new ConnectionInfo(
-                rs.getLong("id"),
-                rs.getString("name"),
-                rs.getString("host"),
-                rs.getInt("port"),
-                rs.getString("username"),
-                rs.getString("password"),
-                rs.getBoolean("auto_connect"),
-                rs.getInt("sort_order")
-        );
+        long id = rs.getLong("id");
+        String name = rs.getString("name");
+        String host = rs.getString("host");
+        int port = rs.getInt("port");
+        String username = rs.getString("username");
+        String encryptedPwd = rs.getString("password");
+        boolean savePassword = rs.getBoolean("save_password");
+        int sortOrder = rs.getInt("sort_order");
+
+        // 解密：仅当 save_password=true 且加密文本非空时解密
+        String plainPwd = "";
+        if (savePassword && encryptedPwd != null && !encryptedPwd.isBlank()) {
+            plainPwd = EncryptionUtil.decrypt(encryptedPwd);
+        }
+
+        return new ConnectionInfo(id, name, host, port, username, plainPwd, savePassword, sortOrder);
     }
 }

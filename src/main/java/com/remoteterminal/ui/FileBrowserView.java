@@ -66,24 +66,15 @@ public class FileBrowserView extends VBox {
         pathBar.setPadding(new Insets(4, 8, 4, 8));
         pathBar.setStyle("-fx-background-color: #333333; -fx-border-color: #444444; -fx-border-width: 0 0 1 0;");
 
-        Button homeBtn = new Button("\uD83C\uDFE0");
-        homeBtn.setTooltip(new Tooltip("根目录"));
-        homeBtn.setOnAction(e -> navigateTo("/"));
-
         Button upBtn = new Button("\u2B06");
         upBtn.setTooltip(new Tooltip("上级目录"));
         upBtn.setOnAction(e -> goUp());
 
         Button refreshBtn = new Button("\u21BB");
         refreshBtn.setTooltip(new Tooltip("刷新"));
-        refreshBtn.setOnAction(e -> refresh());
+        refreshBtn.setOnAction(e -> forceRefresh());
 
-        pathLabel = new Label("/");
-        pathLabel.setStyle("-fx-text-fill: #cccccc; -fx-font-size: 12px;");
-        pathLabel.setMaxWidth(Double.MAX_VALUE);
-        HBox.setHgrow(pathLabel, Priority.ALWAYS);
-
-        // 上传按钮（路径栏右侧）
+        // 上传按钮（刷新按钮右侧）
         MenuButton uploadBtn = new MenuButton("\u2B06\uFE0F");
         uploadBtn.setTooltip(new Tooltip("上传到当前目录"));
         uploadBtn.setStyle("-fx-background-color: #0e639c; -fx-text-fill: white; -fx-font-size: 14px; -fx-padding: 2 8;");
@@ -96,7 +87,12 @@ public class FileBrowserView extends VBox {
 
         uploadBtn.getItems().addAll(uploadFileItem, uploadDirItem);
 
-        pathBar.getChildren().addAll(homeBtn, upBtn, refreshBtn, new Separator(), pathLabel, uploadBtn);
+        pathLabel = new Label("/");
+        pathLabel.setStyle("-fx-text-fill: #cccccc; -fx-font-size: 12px;");
+        pathLabel.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(pathLabel, Priority.ALWAYS);
+
+        pathBar.getChildren().addAll(upBtn, refreshBtn, uploadBtn, new Separator(), pathLabel);
         pathBar.getStyleClass().add("toolbar");
 
         // ---- 文件列表 ----
@@ -367,6 +363,13 @@ public class FileBrowserView extends VBox {
         if (currentPath != null) {
             navigateTo(currentPath);
         }
+    }
+
+    /** 强制刷新 — 绕过导航锁，确保刷新按钮始终可点击 */
+    private void forceRefresh() {
+        if (currentPath == null || currentFM == null || currentConnId == null) return;
+        navigating = false; // 清除可能卡住的锁
+        refresh();
     }
 
     public Long getCurrentConnId() { return currentConnId; }
