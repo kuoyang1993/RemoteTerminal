@@ -4,6 +4,9 @@ import com.jcraft.jsch.*;
 import com.remoteterminal.model.ConnectionInfo;
 
 import java.io.*;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.util.Arrays;
 import java.util.Properties;
 
 /**
@@ -27,19 +30,67 @@ public class SSHConnection implements AutoCloseable {
         JSch jsch = new JSch();
         session = jsch.getSession(info.username(), info.host(), info.port());
 
-        String password = info.password();
+        final String password = info.password();
         if (password != null && !password.isEmpty()) {
             session.setPassword(password);
         }
+
+        // 关键：同时实现 UserInfo 和 UIKeyboardInteractive，
+        // keyboard-interactive 认证的每次提问都用密码立即应答，绝不挂起
+        session.setUserInfo(new AuthHandler(password));
+
+        // 自定义 SocketFactory：强制 TCP connect 3 秒超时，避免 DNS/TCP 阶段卡死
+        session.setSocketFactory(new QuickSocketFactory());
 
         Properties config = new Properties();
         config.put("StrictHostKeyChecking", "no");
         config.put("PreferredAuthentications", "password,keyboard-interactive");
         session.setConfig(config);
-        session.setTimeout(15000);
-        session.connect(10000);
+        session.setTimeout(3000);
+        session.connect(3000);
 
         connected = true;
+    }
+
+    /** 同时实现 UserInfo + UIKeyboardInteractive，让键盘交互认证即时响应 */
+    private static class AuthHandler implements UserInfo, UIKeyboardInteractive {
+        private final String password;
+
+        AuthHandler(String password) {
+            this.password = password == null ? "" : password;
+        }
+
+        @Override public String getPassword() { return password; }
+        @Override public boolean promptYesNo(String str) { return true; }
+        @Override public String getPassphrase() { return password.isEmpty() ? null : password; }
+        @Override public boolean promptPassword(String message) { return true; }
+        @Override public boolean promptPassphrase(String message) { return true; }
+        @Override public void showMessage(String message) {}
+
+        @Override
+        public String[] promptKeyboardInteractive(String destination, String name,
+                String instruction, String[] prompt, boolean[] echo) {
+            // 所有交互提示用密码立即应答，不阻塞等待
+            String[] response = new String[prompt.length];
+            Arrays.fill(response, password.isEmpty() ? "" : password);
+            return response;
+        }
+    }
+
+    /** 自定义 SocketFactory：强制 TCP 连接 3 秒超时 */
+    private static class QuickSocketFactory implements SocketFactory {
+        @Override
+        public Socket createSocket(String host, int port) throws IOException {
+            Socket socket = new Socket();
+            socket.connect(new InetSocketAddress(host, port), 3000);
+            return socket;
+        }
+        @Override public InputStream getInputStream(Socket socket) throws IOException {
+            return socket.getInputStream();
+        }
+        @Override public OutputStream getOutputStream(Socket socket) throws IOException {
+            return socket.getOutputStream();
+        }
     }
 
     /** 断开SSH连接 */

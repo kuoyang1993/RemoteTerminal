@@ -525,10 +525,19 @@ public class MainLayout extends BorderPane {
         // 未保存的连接使用临时 ID
         final long effectiveId = info.isPersisted() ? info.id() : tempIdSeq.getAndDecrement();
 
+        // 硬超时标记：防止 SSH 底层忽略超时导致界面永远无反馈
+        final java.util.concurrent.atomic.AtomicBoolean completed =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        final java.util.concurrent.atomic.AtomicBoolean timeoutFired =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+
         new Thread(() -> {
             try {
                 SSHConnection ssh = new SSHConnection(info);
                 ssh.connect();
+
+                // 连接成功，取消超时
+                if (!completed.compareAndSet(false, true)) return;
 
                 SSHTerminal terminal = new SSHTerminal(ssh);
                 SSHFileManager fileManager = new SSHFileManager(ssh);
@@ -623,6 +632,7 @@ public class MainLayout extends BorderPane {
                 });
 
             } catch (Exception e) {
+                if (!completed.compareAndSet(false, true)) return;
                 Platform.runLater(() -> {
                     setStatus("连接失败: " + e.getMessage());
                     Alert alert = new Alert(Alert.AlertType.ERROR);
@@ -633,6 +643,25 @@ public class MainLayout extends BorderPane {
                 });
             }
         }, "Connect-" + info.name()).start();
+
+        // 看门狗：6 秒内无论底层什么情况，必定给用户反馈
+        new Thread(() -> {
+            try {
+                Thread.sleep(6000);
+            } catch (InterruptedException e) {
+                return;
+            }
+            if (timeoutFired.compareAndSet(false, true) && !completed.get()) {
+                Platform.runLater(() -> {
+                    setStatus("连接超时: " + info.name());
+                    Alert alert = new Alert(Alert.AlertType.ERROR);
+                    alert.setTitle("连接超时");
+                    alert.setHeaderText("无法连接到 " + info.name());
+                    alert.setContentText("连接超过6秒未响应，请检查网络或服务器状态。");
+                    alert.showAndWait();
+                });
+            }
+        }, "Watchdog-" + info.name()).start();
     }
 
     public void disconnectById(long connId) {
