@@ -43,25 +43,94 @@ echo ""
 # ============================================================
 echo -e "${YELLOW}[0/5] Checking environment...${NC}"
 
-# --- JAVA_HOME ---
-if [ -z "$JAVA_HOME" ]; then
-    JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java 2>/dev/null) 2>/dev/null) 2>/dev/null) 2>/dev/null)
-    if [ -z "$JAVA_HOME" ] || [ ! -d "$JAVA_HOME" ]; then
-        echo -e "${RED}  ERROR: JAVA_HOME not set and java not found!${NC}"
-        exit 1
+# --- JAVA_HOME 多重检测 ---
+detect_java_home() {
+    # 1. 环境变量优先
+    if [ -n "$JAVA_HOME" ] && [ -d "$JAVA_HOME" ] && [ -f "$JAVA_HOME/bin/java" ]; then
+        echo "$JAVA_HOME"
+        return
     fi
+    # 2. 从 java 命令推导
+    if JAVA_BIN=$(which java 2>/dev/null); then
+        JAVA_REAL=$(readlink -f "$JAVA_BIN" 2>/dev/null || echo "$JAVA_BIN")
+        # java 通常在 <JDK>/bin/java 或 <JDK>/jre/bin/java
+        CANDIDATE=$(dirname "$(dirname "$JAVA_REAL")")
+        if [ -f "$CANDIDATE/bin/javac" ]; then
+            echo "$CANDIDATE"
+            return
+        fi
+        # 尝试 jre 嵌套: <JDK>/jre/bin/java -> <JDK>
+        CANDIDATE=$(dirname "$CANDIDATE")
+        if [ -f "$CANDIDATE/bin/javac" ]; then
+            echo "$CANDIDATE"
+            return
+        fi
+    fi
+    # 3. 常见 Linux JDK 路径
+    for candidate in \
+        /usr/lib/jvm/java-17-openjdk-amd64 \
+        /usr/lib/jvm/java-17-openjdk \
+        /usr/lib/jvm/jdk-17 \
+        /usr/lib/jvm/jdk-21 \
+        /usr/lib/jvm/java-21-openjdk-amd64 \
+        /usr/lib/jvm/java-11-openjdk-amd64; do
+        if [ -f "$candidate/bin/java" ] && [ -f "$candidate/bin/javac" ]; then
+            echo "$candidate"
+            return
+        fi
+    done
+    # 失败
+    return 1
+}
+
+JAVA_HOME=$(detect_java_home)
+if [ -z "$JAVA_HOME" ] || [ ! -d "$JAVA_HOME" ]; then
+    echo -e "${RED}  ERROR: Cannot detect JDK!${NC}"
+    echo "  Set JAVA_HOME or install JDK 17+:"
+    echo "    Ubuntu/Debian: sudo apt install openjdk-17-jdk"
+    echo "    Fedora/RHEL:   sudo dnf install java-17-openjdk-devel"
+    exit 1
 fi
 echo -e "${GREEN}  JAVA_HOME = $JAVA_HOME${NC}"
 
 JAVA_VER=$("$JAVA_HOME/bin/java" -version 2>&1 | head -1 | grep -oP 'version "\K[\d._]+' || true)
 echo -e "${GREEN}  Java      = $JAVA_VER${NC}"
 
-# --- jpackage ---
-if [ ! -f "$JAVA_HOME/bin/jpackage" ]; then
-    echo -e "${RED}  ERROR: jpackage not found (need JDK 16+)${NC}"
+# --- jpackage 多重查找 ---
+JPKG=""
+find_jpackage() {
+    [ -n "$JPKG" ] && return
+    # 1. JAVA_HOME/bin/ 标准位置
+    [ -f "$JAVA_HOME/bin/jpackage" ] && JPKG="$JAVA_HOME/bin/jpackage" && return
+    # 2. 直接用 which 找
+    command -v jpackage &>/dev/null && JPKG=$(command -v jpackage) && return
+    # 3. 在 PATH 同目录找 jlink，再在同目录找 jpackage
+    if command -v jlink &>/dev/null; then
+        JLINK_DIR=$(dirname "$(command -v jlink)")
+        [ -f "$JLINK_DIR/jpackage" ] && JPKG="$JLINK_DIR/jpackage" && return
+    fi
+    # 4. 常见替代路径
+    [ -f "/usr/lib/jvm/java-17-openjdk-amd64/bin/jpackage" ] && JPKG="/usr/lib/jvm/java-17-openjdk-amd64/bin/jpackage" && return
+}
+find_jpackage
+
+if [ -z "$JPKG" ]; then
+    echo -e "${RED}  ERROR: jpackage not found!${NC}"
+    echo "  jpackage requires JDK 16+ (full JDK, not JRE)."
+    echo ""
+    echo "  Check your JDK version:"
+    echo "    $JAVA_HOME/bin/java --version"
+    echo ""
+    echo "  Install full JDK 17+:"
+    echo "    Ubuntu/Debian: sudo apt install openjdk-17-jdk"
+    echo "    Fedora/RHEL:   sudo dnf install java-17-openjdk-devel"
+    echo ""
+    echo "  If JDK is installed elsewhere, set JAVA_HOME:"
+    echo "    export JAVA_HOME=/path/to/jdk-17"
+    echo "    export PATH=\$JAVA_HOME/bin:\$PATH"
     exit 1
 fi
-echo -e "${GREEN}  jpackage  = OK${NC}"
+echo -e "${GREEN}  jpackage  = $JPKG${NC}"
 
 # --- Maven (优先 mvnw，其次 mvn) ---
 if [ -f "./mvnw" ]; then
@@ -153,12 +222,52 @@ echo -e "${YELLOW}[3/5] jlink runtime (JDK + JavaFX Linux)...${NC}"
 RUNTIME_DIR="target/runtime-linux"
 rm -rf "$RUNTIME_DIR"
 
-JDK_JMODS="$JAVA_HOME/jmods"
-if [ ! -d "$JDK_JMODS" ]; then
-    echo -e "${RED}  ERROR: JDK jmods not found at $JDK_JMODS${NC}"
-    echo "  Make sure you're using a full JDK (not JRE)."
+# --- 查找 jmods（RHEL/Fedora 装在独立包里） ---
+JDK_JMODS=""
+find_jmods() {
+    [ -n "$JDK_JMODS" ] && return
+    # 1. 标准位置：<JAVA_HOME>/jmods
+    [ -d "$JAVA_HOME/jmods" ] && JDK_JMODS="$JAVA_HOME/jmods" && return
+    # 2. RHEL/Fedora 独立包 java-17-openjdk-jmods 可能装在这里
+    for d in \
+        /usr/lib/jvm/jre-17-openjdk/lib/jmods \
+        /usr/share/jmods \
+        /usr/lib/jvm/jmods \
+        /usr/java/jmods; do
+        [ -d "$d" ] && JDK_JMODS="$d" && return
+    done
+    # 3. 在 JAVA_HOME 上级目录搜索（/usr/lib/jvm/ 下可能还有其他 JDK 版本带 jmods）
+    JVM_ROOT=$(dirname "$JAVA_HOME")
+    if [ -d "$JVM_ROOT" ]; then
+        for d in "$JVM_ROOT"/*/jmods; do
+            if [ -d "$d" ]; then
+                JDK_JMODS="$d"
+                return
+            fi
+        done
+    fi
+}
+find_jmods
+
+if [ -z "$JDK_JMODS" ]; then
+    echo -e "${RED}  ERROR: JDK jmods not found!${NC}"
+    echo "  jlink requires jmods, which is included in the full JDK."
+    echo ""
+    echo "  Detected JAVA_HOME: $JAVA_HOME"
+    echo ""
+    echo "  Install jmods (run as root):"
+    echo "    RHEL 9 / Fedora:  sudo dnf install java-17-openjdk-jmods"
+    echo "    CentOS Stream:    sudo dnf install java-17-openjdk-jmods"
+    echo "    Ubuntu / Debian:  jmods is included in openjdk-17-jdk,"
+    echo "                      reinstall: sudo apt install --reinstall openjdk-17-jdk"
+    echo ""
+    echo "  Or manually set jmods path:"
+    echo "    export JDK_JMODS=/path/to/jmods"
+    echo "    Then run: sed -i 's|JDK_JMODS=\"\"|JDK_JMODS=\"$JDK_JMODS\"|' build-linux.sh"
+    echo "    And re-run: ./build-linux.sh"
     exit 1
 fi
+echo -e "${GREEN}  jmods     = $JDK_JMODS${NC}"
 
 MODULES="java.base,java.desktop,java.logging,java.management,java.naming"
 MODULES="${MODULES},java.security.jgss,java.security.sasl,java.sql"
@@ -244,7 +353,8 @@ else
 fi
 
 # --- 公共 jpackage 参数 ---
-COMMON_ARGS=(
+# 基础参数（所有类型共用）
+JPKG_BASE=(
     --name             "$APP_NAME"
     --app-version      "$APP_VERSION"
     --vendor           "RemoteTerminal"
@@ -254,8 +364,12 @@ COMMON_ARGS=(
     --main-class       "$MAIN_CLASS"
     --runtime-image    "$RUNTIME_DIR"
     --dest             "$DIST_DIR"
-    --about-url        "https://github.com"
     "${ICON_ARG[@]}"
+)
+
+# .deb / .rpm 额外参数（--about-url 对 app-image 无效）
+JPKG_INSTALL=(
+    --about-url        "https://github.com"
 )
 
 # --- 构建类型选择 ---
@@ -263,35 +377,48 @@ BUILD_TYPE="${1:-all}"
 
 build_appimage() {
     echo ""
-    echo -e "${YELLOW}  Building AppImage (AppDir + .tar.gz)...${NC}"
-    
-    APPIMAGE_DIR="$DIST_DIR/appimage"
-    rm -rf "$APPIMAGE_DIR"
-    
-    "$JAVA_HOME/bin/jpackage" \
-        "${COMMON_ARGS[@]}" \
-        --type app-image \
-        --name "$APP_NAME" \
-        --app-version "$APP_VERSION" 2>&1 | tail -3
+    echo -e "${YELLOW}  Building app-image -> .tar.gz (universal Linux)...${NC}"
 
-    # 创建启动脚本（放在 AppDir 根目录）
-    APP_LAUNCH="$DIST_DIR/$APP_NAME/bin/$APP_NAME"
-    if [ ! -f "$APP_LAUNCH" ]; then
-        # jpackage 创建的 app-image 在子目录中
-        APPIMAGE_BIN="$DIST_DIR/$APP_NAME/bin/$APP_NAME"
-        # 找到实际位置
-        ACTUAL_BIN=$(find "$DIST_DIR/$APP_NAME" -name "$APP_NAME" -type f -not -path "*/runtime/*" | head -1)
+    # 先清理可能残留的同名目录，避免 jpackage 因目录已存在而失败
+    rm -rf "$DIST_DIR/$APP_NAME"
+
+    "$JPKG" \
+        "${JPKG_BASE[@]}" \
+        --type app-image 2>&1 | tail -3
+
+    JPKG_RC=${PIPESTATUS[0]}
+    if [ $JPKG_RC -ne 0 ]; then
+        echo -e "${RED}  ERROR: jpackage app-image failed (exit $JPKG_RC)${NC}"
+        return
     fi
 
-    # 打包为 .tar.gz（最通用的 Linux 安装格式）
+    # jpackage --type app-image 在 --dest 下创建 <name>/ 目录
+    APP_IMAGE_DIR="$DIST_DIR/$APP_NAME"
+    if [ ! -d "$APP_IMAGE_DIR" ]; then
+        echo -e "${RED}  ERROR: app-image dir not found: $APP_IMAGE_DIR${NC}"
+        return
+    fi
+
+    # 验证启动脚本存在
+    if [ ! -f "$APP_IMAGE_DIR/bin/$APP_NAME" ]; then
+        echo -e "${RED}  ERROR: launcher not found in $APP_IMAGE_DIR/bin/${NC}"
+        return
+    fi
+
+    # 打包为 .tar.gz
     cd "$DIST_DIR"
     TARBALL="${APP_NAME}-${APP_VERSION}-linux-x64.tar.gz"
-    tar -czf "$TARBALL" "$APP_NAME"
+    rm -f "$TARBALL"
+    tar -czf "$TARBALL" "$APP_NAME" || {
+        echo -e "${RED}  ERROR: tar failed${NC}"
+        cd "$SCRIPT_DIR"
+        return
+    }
     cd "$SCRIPT_DIR"
-    
+
     TAR_SIZE=$(du -h "$DIST_DIR/$TARBALL" 2>/dev/null | cut -f1)
-    echo -e "${GREEN}  AppImage: $DIST_DIR/$TARBALL ($TAR_SIZE)${NC}"
-    echo -e "${GREEN}  Usage: tar -xzf $TARBALL && ./$APP_NAME/bin/$APP_NAME${NC}"
+    echo -e "${GREEN}  Package : $DIST_DIR/$TARBALL ($TAR_SIZE)${NC}"
+    echo -e "${GREEN}  Install : tar -xzf $TARBALL && ./$APP_NAME/bin/$APP_NAME${NC}"
 }
 
 build_deb() {
@@ -302,8 +429,9 @@ build_deb() {
     echo ""
     echo -e "${YELLOW}  Building .deb package...${NC}"
 
-    "$JAVA_HOME/bin/jpackage" \
-        "${COMMON_ARGS[@]}" \
+    "$JPKG" \
+        "${JPKG_BASE[@]}" \
+        "${JPKG_INSTALL[@]}" \
         --type deb \
         --linux-package-name "remoteterminal" \
         --linux-shortcut \
@@ -327,8 +455,9 @@ build_rpm() {
     echo ""
     echo -e "${YELLOW}  Building .rpm package...${NC}"
 
-    "$JAVA_HOME/bin/jpackage" \
-        "${COMMON_ARGS[@]}" \
+    "$JPKG" \
+        "${JPKG_BASE[@]}" \
+        "${JPKG_INSTALL[@]}" \
         --type rpm \
         --linux-package-name "remoteterminal" \
         --linux-shortcut \
