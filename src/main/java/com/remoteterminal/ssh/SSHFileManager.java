@@ -54,60 +54,95 @@ public class SSHFileManager {
         }
     }
 
-    /** 列出目录内容（线程安全，防御性处理 JSch 内部解析异常） */
+    /** 列出目录内容（线程安全，防御性处理 JSch 内部解析异常；遇 EOF 自动重建通道重试） */
     public List<SftpFileItem> listFiles(String path) throws Exception {
-        // 整个 SFTP 操作加锁，防止并发使用共享通道
+        Exception lastError;
+        List<SftpFileItem> result;
         synchronized (sshConn.getSftpLock()) {
-            ChannelSftp sftp = sshConn.openSftpChannel();
-            List<SftpFileItem> items = new ArrayList<>();
-
             try {
-                @SuppressWarnings("unchecked")
-                Vector<ChannelSftp.LsEntry> entries = sftp.ls(path);
+                result = doListFiles(path);
+                lastError = null;
+            } catch (Exception e) {
+                result = null;
+                lastError = e;
+            }
+        }
+        // 如果是通道已死（End of file），强制丢弃通道后重试一次
+        if (lastError != null && isEofError(lastError)) {
+            sshConn.invalidateSftpChannel();
+            synchronized (sshConn.getSftpLock()) {
+                return doListFiles(path);
+            }
+        }
+        if (lastError != null) {
+            throw lastError;
+        }
+        return result;
+    }
 
-                if (entries == null || entries.isEmpty()) {
-                    return items;
-                }
+    /** 判断是否为 SFTP 通道断开类异常 */
+    private static boolean isEofError(Throwable t) {
+        while (t != null) {
+            String msg = t.getMessage();
+            if (msg != null && (msg.contains("End of file") || msg.contains("EOF"))) {
+                return true;
+            }
+            t = t.getCause();
+        }
+        return false;
+    }
 
-                for (ChannelSftp.LsEntry entry : entries) {
-                    String name = entry.getFilename();
-                    if (name == null) continue;
-                    if (".".equals(name)) continue;
-                    if ("..".equals(name)) {
-                        try {
-                            items.add(new SftpFileItem(name, true, entry.getAttrs(), path));
-                        } catch (Exception ignored) {
-                            items.add(new SftpFileItem(name, true, null, path));
-                        }
-                        continue;
-                    }
-                    try {
-                        boolean isDir = entry.getAttrs().isDir();
-                        items.add(new SftpFileItem(name, isDir, entry.getAttrs(), path));
-                    } catch (Exception e) {
-                        // JSch 内部解析属性时可能抛出 ArrayIndexOutOfBoundsException
-                        // 回退处理：通过 stat 单独获取
-                        try {
-                            String fullPath = path + (path.endsWith("/") ? "" : "/") + name;
-                            SftpATTRS attrs = sftp.stat(fullPath);
-                            items.add(new SftpFileItem(name, attrs.isDir(), attrs, path));
-                        } catch (Exception ex) {
-                            items.add(new SftpFileItem(name, false, null, path));
-                        }
-                    }
-                }
-            } catch (ArrayIndexOutOfBoundsException e) {
-                throw new Exception("SFTP ls 解析失败: " + e.getMessage(), e);
+    /** 实际执行 SFTP ls */
+    private List<SftpFileItem> doListFiles(String path) throws Exception {
+        ChannelSftp sftp = sshConn.openSftpChannel();
+        List<SftpFileItem> items = new ArrayList<>();
+
+        try {
+            @SuppressWarnings("unchecked")
+            Vector<ChannelSftp.LsEntry> entries = sftp.ls(path);
+
+            if (entries == null || entries.isEmpty()) {
+                return items;
             }
 
-            items.sort((a, b) -> {
-                if (a.isDirectory() && !b.isDirectory()) return -1;
-                if (!a.isDirectory() && b.isDirectory()) return 1;
-                return a.name().compareToIgnoreCase(b.name());
-            });
-
-            return items;
+            for (ChannelSftp.LsEntry entry : entries) {
+                String name = entry.getFilename();
+                if (name == null) continue;
+                if (".".equals(name)) continue;
+                if ("..".equals(name)) {
+                    try {
+                        items.add(new SftpFileItem(name, true, entry.getAttrs(), path));
+                    } catch (Exception ignored) {
+                        items.add(new SftpFileItem(name, true, null, path));
+                    }
+                    continue;
+                }
+                try {
+                    boolean isDir = entry.getAttrs().isDir();
+                    items.add(new SftpFileItem(name, isDir, entry.getAttrs(), path));
+                } catch (Exception e) {
+                    // JSch 内部解析属性时可能抛出 ArrayIndexOutOfBoundsException
+                    // 回退处理：通过 stat 单独获取
+                    try {
+                        String fullPath = path + (path.endsWith("/") ? "" : "/") + name;
+                        SftpATTRS attrs = sftp.stat(fullPath);
+                        items.add(new SftpFileItem(name, attrs.isDir(), attrs, path));
+                    } catch (Exception ex) {
+                        items.add(new SftpFileItem(name, false, null, path));
+                    }
+                }
+            }
+        } catch (ArrayIndexOutOfBoundsException e) {
+            throw new Exception("SFTP ls 解析失败: " + e.getMessage(), e);
         }
+
+        items.sort((a, b) -> {
+            if (a.isDirectory() && !b.isDirectory()) return -1;
+            if (!a.isDirectory() && b.isDirectory()) return 1;
+            return a.name().compareToIgnoreCase(b.name());
+        });
+
+        return items;
     }
 
     /** 获取绝对路径 */

@@ -614,11 +614,14 @@ public class MainLayout extends BorderPane {
                     terminalTabPane.getTabs().add(terminalTab);
                     terminalTabPane.getSelectionModel().select(terminalTab);
 
-                    try {
-                        terminal.start();
-                    } catch (Exception e) {
-                        terminalTab.appendError("启动Shell失败: " + e.getMessage());
-                    }
+                    // Shell 通道在后台线程启动，不阻塞 UI（用户立即可见终端界面）
+                    new Thread(() -> {
+                        try {
+                            terminal.start();
+                        } catch (Exception e) {
+                            Platform.runLater(() -> terminalTab.appendError("启动Shell失败: " + e.getMessage()));
+                        }
+                    }, "ShellStart-" + info.name()).start();
 
                     // 仅已保存的连接到左侧列表标记为已连接
                     if (info.isPersisted()) {

@@ -49,6 +49,10 @@ public class SSHConnection implements AutoCloseable {
         session.setTimeout(3000);
         session.connect(3000);
 
+        // 每 30 秒发送 keep-alive，防止空闲时被服务器断开
+        session.setServerAliveInterval(30000);
+        session.setServerAliveCountMax(3);
+
         connected = true;
     }
 
@@ -112,17 +116,37 @@ public class SSHConnection implements AutoCloseable {
         }
     }
 
-    /** 打开SFTP通道（线程安全） */
+    /** 打开SFTP通道（线程安全，带健康检查与自动重建） */
     public ChannelSftp openSftpChannel() throws Exception {
         if (!connected || session == null || !session.isConnected()) {
             throw new IllegalStateException("SSH连接未建立");
         }
         synchronized (sftpLock) {
-            if (sftpChannel == null || !sftpChannel.isConnected()) {
+            if (sftpChannel != null && sftpChannel.isConnected()) {
+                // 健康检查：底层流可能已断开但 isConnected() 仍返回 true
+                try {
+                    sftpChannel.pwd();
+                } catch (Exception e) {
+                    // 通道已死，清理重建
+                    try { sftpChannel.disconnect(); } catch (Exception ignored) {}
+                    sftpChannel = null;
+                }
+            }
+            if (sftpChannel == null) {
                 sftpChannel = (ChannelSftp) session.openChannel("sftp");
                 sftpChannel.connect(10000);
             }
             return sftpChannel;
+        }
+    }
+
+    /** 强制关闭并丢弃缓存的 SFTP 通道（用于出错后强制重建） */
+    public void invalidateSftpChannel() {
+        synchronized (sftpLock) {
+            if (sftpChannel != null) {
+                try { sftpChannel.disconnect(); } catch (Exception ignored) {}
+                sftpChannel = null;
+            }
         }
     }
 

@@ -30,6 +30,9 @@ public class TerminalTab extends Tab {
     private WebEngine webEngine;
     private Runnable onClose;
 
+    // 终端右键菜单引用（用于外部点击关闭）
+    private ContextMenu terminalCtxMenu;
+
     // 标签页右键菜单回调
     private Runnable onReconnect;
     private Runnable onDisconnectAction;
@@ -209,6 +212,15 @@ public class TerminalTab extends Tab {
             // 键盘事件处理（WebView吞掉的部分组合键）
             webView.addEventFilter(KeyEvent.KEY_PRESSED, this::handleKeyEvent);
 
+            // ESC 关闭右键菜单
+            webView.addEventFilter(KeyEvent.KEY_PRESSED, e -> {
+                if (e.getCode() == KeyCode.ESCAPE && terminalCtxMenu != null && terminalCtxMenu.isShowing()) {
+                    terminalCtxMenu.hide();
+                    terminalCtxMenu = null;
+                    e.consume();
+                }
+            });
+
             // 右键菜单
             webView.setContextMenuEnabled(false);
             webView.setOnContextMenuRequested(e -> showTerminalContextMenu(e.getScreenX(), e.getScreenY()));
@@ -348,6 +360,12 @@ public class TerminalTab extends Tab {
     // ========== 右键菜单 ==========
 
     private void showTerminalContextMenu(double x, double y) {
+        // 关闭上次残留的菜单
+        if (terminalCtxMenu != null) {
+            terminalCtxMenu.hide();
+            terminalCtxMenu = null;
+        }
+
         ContextMenu menu = new ContextMenu();
 
         MenuItem copyItem = new MenuItem("复制");
@@ -377,7 +395,55 @@ public class TerminalTab extends Tab {
                 clearScrollbackItem, clearScreenItem, selectAllItem
         );
 
+        menu.setAutoHide(true);
+        menu.setOnHidden(ev -> {
+            terminalCtxMenu = null;
+            // 菜单关闭时清理场景事件过滤器
+            javafx.scene.Scene s = webView.getScene();
+            if (s != null) {
+                s.removeEventFilter(MouseEvent.MOUSE_PRESSED, closeHandler);
+            }
+        });
+
+        terminalCtxMenu = menu;
         menu.show(webView, x, y);
+
+        // WebView 会吞噬鼠标事件导致 autoHide 失效，添加场景级监听兜底
+        javafx.scene.Scene scene = webView.getScene();
+        if (scene != null) {
+            // 监听场景任意位置点击 → 若不在菜单内则关闭
+            scene.addEventFilter(MouseEvent.MOUSE_PRESSED, closeHandler);
+        }
+    }
+
+    /** 点击外部关闭菜单的事件处理器 */
+    private final javafx.event.EventHandler<MouseEvent> closeHandler = this::handleMenuOutsideClick;
+
+    private void handleMenuOutsideClick(MouseEvent event) {
+        if (terminalCtxMenu != null && terminalCtxMenu.isShowing()) {
+            javafx.scene.Node target = event.getTarget() instanceof javafx.scene.Node
+                    ? (javafx.scene.Node) event.getTarget() : null;
+            if (target != null) {
+                javafx.scene.Node menuNode = terminalCtxMenu.getSkin() != null
+                        ? terminalCtxMenu.getSkin().getNode() : null;
+                if (menuNode != null && isInsideNode(target, menuNode)) {
+                    return; // 点击在菜单内部，不关闭
+                }
+            }
+            // 点击在菜单外部，关闭
+            terminalCtxMenu.hide();
+            terminalCtxMenu = null;
+        }
+    }
+
+    /** 递归检查 target 节点是否在 ancestor 的子树中 */
+    private static boolean isInsideNode(javafx.scene.Node target, javafx.scene.Node ancestor) {
+        javafx.scene.Node current = target;
+        while (current != null) {
+            if (current == ancestor) return true;
+            current = current.getParent();
+        }
+        return false;
     }
 
     // ========== 生命周期 ==========

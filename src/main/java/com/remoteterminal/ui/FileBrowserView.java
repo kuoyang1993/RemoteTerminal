@@ -20,7 +20,7 @@ import java.util.function.Consumer;
 /**
  * 文件浏览器 - 纯列表视图，点击目录导航，无折叠箭头，无限深度
  * 展示当前目录内容，缩进体现层级
- * 支持拖拽上传/下载和进度展示
+ * 支持拖拽上传和进度展示
  */
 public class FileBrowserView extends VBox {
 
@@ -44,10 +44,11 @@ public class FileBrowserView extends VBox {
     // 右键菜单引用（用于手动关闭）
     private ContextMenu fileBrowserCtxMenu;
 
-    // 预下载缓存：选中条目时后台下载，拖拽时直接使用（避免阻塞 UI + 防止拖拽手势损坏）
-    private volatile Path dragCacheDir;
-    private volatile String dragCacheName;
-    private Thread dragPreloadThread;
+    // 远程剪贴板（仅在同一个 SSH 会话内有效）
+    private String remoteClipPath;       // 远程绝对路径
+    private String remoteClipName;       // 文件名
+    private boolean remoteClipIsDir;     // 是否为目录
+    private Long remoteClipConnId;       // 来源连接ID
 
     // 回调和元数据
     private Consumer<String> onStatusChange;
@@ -154,11 +155,27 @@ public class FileBrowserView extends VBox {
             }
         });
 
-        // ESC 键关闭菜单
+        // 键盘快捷键
         fileListView.setOnKeyPressed(e -> {
+            // ESC 键关闭菜单
             if (e.getCode() == KeyCode.ESCAPE && fileBrowserCtxMenu != null) {
                 fileBrowserCtxMenu.hide();
                 fileBrowserCtxMenu = null;
+                e.consume();
+                return;
+            }
+            // Ctrl+C：复制当前选中项到远程剪贴板
+            if (e.isControlDown() && e.getCode() == KeyCode.C) {
+                FileEntry sel = fileListView.getSelectionModel().getSelectedItem();
+                if (sel != null) {
+                    copyToRemoteClipboard(sel.getFullPath(), sel.getName(), sel.isDirectory());
+                }
+                e.consume();
+                return;
+            }
+            // Ctrl+V：从远程剪贴板粘贴到当前目录
+            if (e.isControlDown() && e.getCode() == KeyCode.V) {
+                pasteFromRemoteClipboard(currentPath);
                 e.consume();
             }
         });
@@ -194,7 +211,7 @@ public class FileBrowserView extends VBox {
     // ==================== 拖拽支持 ====================
 
     private void setupDragAndDrop() {
-        // --- 拖拽外部文件到列表 → 上传 ---
+        // --- 拖拽外部文件到列表 → 上传到 Linux ---
         fileListView.setOnDragOver(e -> {
             if (e.getDragboard().hasFiles() && currentFM != null && !transferring) {
                 e.acceptTransferModes(TransferMode.COPY);
@@ -213,137 +230,6 @@ public class FileBrowserView extends VBox {
             e.setDropCompleted(true);
             e.consume();
         });
-
-        // --- 选中条目时后台预下载，拖拽时直接用缓存 ---
-        // 这是关键修复：必须始终在 onDragDetected 中调用 startDragAndDrop()，
-        // 否则 JavaFX 的拖拽手势识别状态会损坏，导致后续拖拽无响应。
-        fileListView.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
-            // 选中变化时清理旧缓存并启动新预下载
-            clearDragCache();
-            if (sel == null || currentFM == null) return;
-
-            final FileEntry toCache = sel;
-            dragPreloadThread = new Thread(() -> {
-                Path tmp = null;
-                try {
-                    tmp = Files.createTempDirectory("rt_drag_");
-                    if (toCache.isDirectory()) {
-                        currentFM.downloadDirectory(toCache.getFullPath(), tmp);
-                    } else {
-                        currentFM.downloadFile(toCache.getFullPath(), tmp.resolve(toCache.getName()));
-                    }
-                    dragCacheDir = tmp;
-                    dragCacheName = toCache.getName();
-                    // 更新状态栏提示
-                    Platform.runLater(() -> {
-                        if (onStatusChange != null) {
-                            onStatusChange.accept("就绪: " + toCache.getName() + " (可直接拖拽)");
-                        }
-                    });
-                } catch (Exception ex) {
-                    if (tmp != null) deleteDirRecursive(tmp);
-                }
-            }, "Drag-Preload");
-            dragPreloadThread.setDaemon(true);
-            dragPreloadThread.start();
-        });
-
-        // --- 拖拽到本地：始终调用 startDragAndDrop() ---
-        fileListView.setOnDragDetected(e -> {
-            FileEntry selected = fileListView.getSelectionModel().getSelectedItem();
-            if (selected == null || currentFM == null || transferring) {
-                return; // 不消费事件，让手势自然结束
-            }
-
-            if (fileBrowserCtxMenu != null) {
-                fileBrowserCtxMenu.hide();
-            }
-
-            Path dataDir = null;
-            boolean fromCache = false;
-
-            // 优先使用预下载缓存
-            if (dragCacheDir != null && Files.exists(dragCacheDir)
-                    && selected.getName().equals(dragCacheName)) {
-                dataDir = dragCacheDir;
-                fromCache = true;
-            } else {
-                // 缓存未就绪 → 同步下载（显示等待光标，通常很快因为预下载已有先发优势）
-                getScene().setCursor(javafx.scene.Cursor.WAIT);
-                try {
-                    Path tmp = Files.createTempDirectory("rt_drag_");
-                    if (selected.isDirectory()) {
-                        currentFM.downloadDirectory(selected.getFullPath(), tmp);
-                    } else {
-                        currentFM.downloadFile(selected.getFullPath(), tmp.resolve(selected.getName()));
-                    }
-                    dataDir = tmp;
-                } catch (Exception ex) {
-                    showError("下载失败: " + ex.getMessage());
-                    getScene().setCursor(javafx.scene.Cursor.DEFAULT);
-                    e.consume();
-                    return;
-                } finally {
-                    getScene().setCursor(javafx.scene.Cursor.DEFAULT);
-                }
-            }
-
-            // 收集拖拽文件列表
-            List<File> dragFiles = new ArrayList<>();
-            if (dataDir != null && Files.exists(dataDir)) {
-                try (var stream = Files.walk(dataDir)) {
-                    stream.filter(p -> !Files.isDirectory(p))
-                          .forEach(p -> dragFiles.add(p.toFile()));
-                } catch (Exception ignored) {}
-            }
-
-            // ★ 关键：必须调用 startDragAndDrop，否则拖拽手势损坏
-            Dragboard db = fileListView.startDragAndDrop(TransferMode.COPY);
-            ClipboardContent content = new ClipboardContent();
-            if (!dragFiles.isEmpty()) {
-                content.putFiles(dragFiles);
-            }
-            content.putString(selected.getFullPath());
-            db.setContent(content);
-
-            // 拖拽完成后清理
-            final Path toClean = dataDir;
-            final boolean wasCache = fromCache;
-            fileListView.setOnDragDone(dragEv -> {
-                if (wasCache) {
-                    dragCacheDir = null;
-                    dragCacheName = null;
-                }
-                new Thread(() -> {
-                    try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
-                    deleteDirRecursive(toClean);
-                }, "Clean-Drag").start();
-            });
-
-            e.consume();
-        });
-    }
-
-    /** 清理预下载缓存 */
-    private void clearDragCache() {
-        if (dragPreloadThread != null && dragPreloadThread.isAlive()) {
-            dragPreloadThread.interrupt();
-        }
-        dragCacheName = null;
-        Path old = dragCacheDir;
-        dragCacheDir = null;
-        if (old != null) {
-            new Thread(() -> deleteDirRecursive(old), "Del-Cache").start();
-        }
-    }
-
-    /** 递归删除目录 */
-    private static void deleteDirRecursive(Path dir) {
-        if (dir == null || !Files.exists(dir)) return;
-        try (var stream = Files.walk(dir)) {
-            stream.sorted(java.util.Comparator.reverseOrder())
-                  .forEach(p -> { try { Files.deleteIfExists(p); } catch (Exception ignored) {} });
-        } catch (Exception ignored) {}
     }
 
     /** 上传按钮处理 */
@@ -457,6 +343,7 @@ public class FileBrowserView extends VBox {
         this.currentFM = null;
         this.currentPath = "/";
         this.pathHistory.clear();
+        clearRemoteClipboard();
         Platform.runLater(() -> {
             fileListView.getItems().clear();
             pathLabel.setText("/");
@@ -505,7 +392,11 @@ public class FileBrowserView extends VBox {
             } catch (Exception e) {
                 Platform.runLater(() -> {
                     fileListView.getItems().clear();
-                    fileListView.getItems().add(new FileEntry("(加载失败: " + e.getMessage() + ")", false, "", "", 0));
+                    String errMsg = e.getMessage();
+                    if (errMsg != null && (errMsg.contains("End of file") || errMsg.contains("EOF"))) {
+                        errMsg = "SSH连接已断开，请点击刷新按钮或重新连接";
+                    }
+                    fileListView.getItems().add(new FileEntry("(加载失败: " + errMsg + ")", false, "", "", 0));
                     navigating = false;
                 });
             }
@@ -556,6 +447,11 @@ public class FileBrowserView extends VBox {
 
         // 空白区域菜单
         if (selected == null) {
+            // 粘贴（仅当远程剪贴板有内容且属于同一会话时可用）
+            MenuItem pasteItem = new MenuItem("粘贴");
+            pasteItem.setDisable(!isRemoteClipValid());
+            pasteItem.setOnAction(e -> pasteFromRemoteClipboard(currentPath));
+
             MenuItem refreshItem = new MenuItem("刷新");
             refreshItem.setOnAction(e -> refresh());
 
@@ -579,7 +475,8 @@ public class FileBrowserView extends VBox {
                 if (onStatusChange != null) onStatusChange.accept("路径已复制: " + currentPath);
             });
 
-            menu.getItems().addAll(newFolderItem, newFileItem, new SeparatorMenuItem(),
+            menu.getItems().addAll(pasteItem, new SeparatorMenuItem(),
+                    newFolderItem, newFileItem, new SeparatorMenuItem(),
                     uploadFileItem, uploadDirItem, new SeparatorMenuItem(),
                     copyPathItem, refreshItem);
             return menu;
@@ -593,6 +490,19 @@ public class FileBrowserView extends VBox {
             MenuItem enterItem = new MenuItem("进入目录");
             enterItem.setOnAction(e -> navigateTo(path));
             menu.getItems().add(enterItem);
+
+            menu.getItems().add(new SeparatorMenuItem());
+
+            // 复制文件夹
+            MenuItem copyItem = new MenuItem("复制");
+            copyItem.setOnAction(e -> copyToRemoteClipboard(path, selected.getName(), true));
+            menu.getItems().add(copyItem);
+
+            // 粘贴到该文件夹
+            MenuItem pasteItem = new MenuItem("粘贴");
+            pasteItem.setDisable(!isRemoteClipValid());
+            pasteItem.setOnAction(e -> pasteFromRemoteClipboard(path));
+            menu.getItems().add(pasteItem);
         } else {
             MenuItem openItem = new MenuItem("打开/查看");
             openItem.setOnAction(e -> openRemoteFile(path));
@@ -601,6 +511,13 @@ public class FileBrowserView extends VBox {
             MenuItem editItem = new MenuItem("用编辑器打开");
             editItem.setOnAction(e -> openWithEditor(path));
             menu.getItems().add(editItem);
+
+            menu.getItems().add(new SeparatorMenuItem());
+
+            // 复制文件
+            MenuItem copyItem = new MenuItem("复制");
+            copyItem.setOnAction(e -> copyToRemoteClipboard(path, selected.getName(), false));
+            menu.getItems().add(copyItem);
         }
 
         menu.getItems().add(new SeparatorMenuItem());
@@ -937,6 +854,164 @@ public class FileBrowserView extends VBox {
         progressBar.setProgress(0);
         progressLabel.setText("0%");
         progressFileLabel.setText("");
+    }
+
+    // ==================== 远程剪贴板（复制/粘贴） ====================
+
+    /** 检查远程剪贴板是否有效（同一会话,有内容） */
+    private boolean isRemoteClipValid() {
+        return remoteClipPath != null
+                && remoteClipConnId != null
+                && remoteClipConnId.equals(currentConnId)
+                && currentFM != null;
+    }
+
+    /** 清空远程剪贴板 */
+    private void clearRemoteClipboard() {
+        remoteClipPath = null;
+        remoteClipName = null;
+        remoteClipConnId = null;
+        remoteClipIsDir = false;
+    }
+
+    /** 复制选中项到远程剪贴板 */
+    private void copyToRemoteClipboard(String path, String name, boolean isDir) {
+        this.remoteClipPath = path;
+        this.remoteClipName = name;
+        this.remoteClipIsDir = isDir;
+        this.remoteClipConnId = currentConnId;
+        if (onStatusChange != null) {
+            onStatusChange.accept("已复制: " + path);
+        }
+    }
+
+    /** 从远程剪贴板粘贴到目标目录 */
+    private void pasteFromRemoteClipboard(String targetDir) {
+        if (!isRemoteClipValid()) {
+            if (onStatusChange != null) onStatusChange.accept("剪贴板为空或不属于当前会话");
+            return;
+        }
+        doRemoteCopy(remoteClipPath, remoteClipName, targetDir, remoteClipIsDir);
+    }
+
+    /** 执行远程复制（带冲突检测） */
+    private void doRemoteCopy(String sourcePath, String sourceName, String targetDir, boolean isSourceDir) {
+        if (currentFM == null) return;
+        String targetPath = targetDir + (targetDir.endsWith("/") ? "" : "/") + sourceName;
+
+        runAsync(() -> {
+            try {
+                boolean exists = remotePathExists(targetPath);
+                if (exists) {
+                    Platform.runLater(() -> handlePasteConflict(sourcePath, sourceName, targetDir, targetPath));
+                } else {
+                    executeAndRefresh(sourcePath, targetDir);
+                }
+            } catch (Exception e) {
+                Platform.runLater(() -> showError("粘贴失败: " + e.getMessage()));
+            }
+        });
+    }
+
+    /** 检测远程路径是否存在 */
+    private boolean remotePathExists(String path) {
+        if (currentFM == null) return false;
+        try {
+            String result = currentFM.exec("test -e " + shellQuote(path) + " && echo y || echo n");
+            return result != null && result.trim().startsWith("y");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 对 shell 参数加单引号转义 */
+    private static String shellQuote(String s) {
+        return "'" + s.replace("'", "'\\''") + "'";
+    }
+
+    /** 处理粘贴冲突对话框 */
+    private void handlePasteConflict(String sourcePath, String sourceName, String targetDir, String targetPath) {
+        Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
+        alert.setTitle("粘贴冲突");
+        alert.setHeaderText("目标位置已存在同名项: " + sourceName);
+        alert.setContentText("请选择处理方式:");
+
+        ButtonType overwriteBtn = new ButtonType("覆盖");
+        ButtonType skipBtn = new ButtonType("跳过");
+        ButtonType renameBtn = new ButtonType("自动重命名");
+        ButtonType cancelBtn = ButtonType.CANCEL;
+
+        alert.getButtonTypes().setAll(overwriteBtn, skipBtn, renameBtn, cancelBtn);
+
+        alert.showAndWait().ifPresent(response -> {
+            if (response == overwriteBtn) {
+                // 先删除已存在的,再复制
+                runAsync(() -> {
+                    try {
+                        if (currentFM != null) {
+                            currentFM.exec("rm -rf " + shellQuote(targetPath));
+                            executeAndRefresh(sourcePath, targetDir);
+                        }
+                    } catch (Exception e) {
+                        Platform.runLater(() -> showError("覆盖失败: " + e.getMessage()));
+                    }
+                });
+            } else if (response == skipBtn) {
+                if (onStatusChange != null) onStatusChange.accept("已跳过: " + sourceName);
+            } else if (response == renameBtn) {
+                runAsync(() -> {
+                    try {
+                        String newName = generateNonConflictName(targetDir, sourceName);
+                        String newTarget = targetDir + (targetDir.endsWith("/") ? "" : "/") + newName;
+                        if (currentFM != null) {
+                            currentFM.exec("cp -a " + shellQuote(sourcePath) + " " + shellQuote(newTarget));
+                        }
+                        Platform.runLater(() -> {
+                            refresh();
+                            if (onStatusChange != null) onStatusChange.accept("已粘贴为: " + newName);
+                        });
+                    } catch (Exception e) {
+                        Platform.runLater(() -> showError("粘贴失败: " + e.getMessage()));
+                    }
+                });
+            }
+            // 取消 → 什么也不做
+        });
+    }
+
+    /** 生成不冲突的文件名,如 "file (1).txt" */
+    private String generateNonConflictName(String targetDir, String sourceName) {
+        int dotIdx = sourceName.lastIndexOf('.');
+        String base = dotIdx > 0 ? sourceName.substring(0, dotIdx) : sourceName;
+        String ext = dotIdx > 0 ? sourceName.substring(dotIdx) : "";
+
+        for (int i = 1; i <= 999; i++) {
+            String candidate = base + " (" + i + ")" + ext;
+            try {
+                if (!sourceName.equals(candidate) && remotePathExists(
+                        targetDir + (targetDir.endsWith("/") ? "" : "/") + candidate)) {
+                    continue;
+                }
+            } catch (Exception ignored) {}
+            return candidate;
+        }
+        // 兜底: 加时间戳
+        return base + "_" + System.currentTimeMillis() + ext;
+    }
+
+    /** 执行 cp -a 并刷新 */
+    private void executeAndRefresh(String sourcePath, String targetDir) {
+        if (currentFM == null) return;
+        try {
+            // cp -a: 递归复制目录 + 保留属性
+            currentFM.exec("cp -a " + shellQuote(sourcePath) + " " + shellQuote(targetDir) + "/");
+            Platform.runLater(() -> {
+                refresh();
+                if (onStatusChange != null) onStatusChange.accept("粘贴完成: " + remoteClipName);
+            });
+        } catch (Exception e) {
+            Platform.runLater(() -> showError("粘贴失败: " + e.getMessage()));
+        }
     }
 
     // ==================== 内部类 ====================
