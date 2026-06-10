@@ -137,6 +137,44 @@ public class SSHFileManager {
         }
     }
 
+    /** 递归下载远程目录到本地（无进度回调） */
+    public void downloadDirectory(String remoteDir, Path localParentDir) throws Exception {
+        downloadDirectory(remoteDir, localParentDir, null);
+    }
+
+    /** 递归下载远程目录到本地（带进度回调，0-100%） */
+    public void downloadDirectory(String remoteDir, Path localParentDir, Consumer<Double> progress) throws Exception {
+        synchronized (sshConn.getSftpLock()) {
+            ChannelSftp sftp = sshConn.openSftpChannel();
+            String dirName = remoteDir.substring(remoteDir.lastIndexOf('/') + 1);
+            Path targetDir = localParentDir.resolve(dirName);
+            Files.createDirectories(targetDir);
+            downloadDirRecursive(sftp, remoteDir, targetDir, progress);
+        }
+    }
+
+    private void downloadDirRecursive(ChannelSftp sftp, String remoteDir, Path localDir,
+                                       Consumer<Double> progress) throws Exception {
+        @SuppressWarnings("unchecked")
+        Vector<ChannelSftp.LsEntry> entries = sftp.ls(remoteDir);
+        for (ChannelSftp.LsEntry entry : entries) {
+            String name = entry.getFilename();
+            if (".".equals(name) || "..".equals(name)) continue;
+            String remotePath = remoteDir + "/" + name;
+            Path localPath = localDir.resolve(name);
+            if (entry.getAttrs().isDir()) {
+                Files.createDirectories(localPath);
+                downloadDirRecursive(sftp, remotePath, localPath, progress);
+            } else {
+                if (progress != null) {
+                    sftp.get(remotePath, localPath.toString(), new TransferProgress(progress));
+                } else {
+                    sftp.get(remotePath, localPath.toString());
+                }
+            }
+        }
+    }
+
     /** 上传文件到远程（无进度回调） */
     public void uploadFile(Path localPath, String remoteDir) throws Exception {
         uploadFile(localPath, remoteDir, null);

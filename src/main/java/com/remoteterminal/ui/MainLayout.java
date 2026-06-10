@@ -241,7 +241,7 @@ public class MainLayout extends BorderPane {
         MenuItem checkUpdate = new MenuItem("检查更新");
         checkUpdate.setOnAction(e -> {
             showAlert(Alert.AlertType.INFORMATION, "检查更新",
-                    "当前版本: v1.0.0\n\n暂无可用更新。");
+                    "当前版本: v1.1.0\n\n暂无可用更新。");
         });
 
         MenuItem feedback = new MenuItem("问题反馈");
@@ -711,7 +711,7 @@ public class MainLayout extends BorderPane {
     private void showAboutDialog() {
         Alert alert = new Alert(Alert.AlertType.INFORMATION);
         alert.setTitle("关于 RemoteTerminal");
-        alert.setHeaderText("RemoteTerminal v1.0.0");
+        alert.setHeaderText("RemoteTerminal v1.1.0");
         alert.setContentText("""
                 基于 JavaFX + JSch + xterm.js 的桌面远程终端工具
                                 

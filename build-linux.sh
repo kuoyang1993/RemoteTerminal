@@ -29,7 +29,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 APP_NAME="RemoteTerminal"
-APP_VERSION="1.0.0"
+APP_VERSION="1.1.0"
 MAIN_CLASS="com.remoteterminal.Main"
 JAVAFX_VER="17.0.14"
 

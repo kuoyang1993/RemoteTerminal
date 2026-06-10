@@ -41,6 +41,14 @@ public class FileBrowserView extends VBox {
     // 传输中标志
     private volatile boolean transferring = false;
 
+    // 右键菜单引用（用于手动关闭）
+    private ContextMenu fileBrowserCtxMenu;
+
+    // 预下载缓存：选中条目时后台下载，拖拽时直接使用（避免阻塞 UI + 防止拖拽手势损坏）
+    private volatile Path dragCacheDir;
+    private volatile String dragCacheName;
+    private Thread dragPreloadThread;
+
     // 回调和元数据
     private Consumer<String> onStatusChange;
 
@@ -113,10 +121,45 @@ public class FileBrowserView extends VBox {
 
         // 右键菜单
         fileListView.setOnContextMenuRequested(e -> {
+            // 关闭上次残留的菜单
+            if (fileBrowserCtxMenu != null) {
+                fileBrowserCtxMenu.hide();
+            }
             FileEntry selected = fileListView.getSelectionModel().getSelectedItem();
-            ContextMenu menu = buildFileBrowserContextMenu(selected);
-            if (menu != null) {
-                menu.show(fileListView, e.getScreenX(), e.getScreenY());
+            fileBrowserCtxMenu = buildFileBrowserContextMenu(selected);
+            if (fileBrowserCtxMenu != null) {
+                fileBrowserCtxMenu.setAutoHide(true);
+                // 菜单被隐藏时清除引用
+                fileBrowserCtxMenu.setOnHidden(ev -> fileBrowserCtxMenu = null);
+                fileBrowserCtxMenu.show(fileListView, e.getScreenX(), e.getScreenY());
+            }
+        });
+
+        // 点击菜单外任意位置 → 关闭菜单
+        this.addEventFilter(MouseEvent.MOUSE_PRESSED, event -> {
+            if (fileBrowserCtxMenu != null && fileBrowserCtxMenu.isShowing()) {
+                javafx.scene.Node target = event.getTarget() instanceof javafx.scene.Node
+                        ? (javafx.scene.Node) event.getTarget() : null;
+                if (target != null) {
+                    // 检查点击目标是否在菜单或菜单项内部
+                    javafx.scene.Node menuNode = fileBrowserCtxMenu.getSkin() != null
+                            ? fileBrowserCtxMenu.getSkin().getNode() : null;
+                    if (menuNode != null && isInsideNode(target, menuNode)) {
+                        return; // 点击在菜单内部，不关闭
+                    }
+                }
+                // 点击在菜单外部，关闭
+                fileBrowserCtxMenu.hide();
+                fileBrowserCtxMenu = null;
+            }
+        });
+
+        // ESC 键关闭菜单
+        fileListView.setOnKeyPressed(e -> {
+            if (e.getCode() == KeyCode.ESCAPE && fileBrowserCtxMenu != null) {
+                fileBrowserCtxMenu.hide();
+                fileBrowserCtxMenu = null;
+                e.consume();
             }
         });
 
@@ -148,10 +191,10 @@ public class FileBrowserView extends VBox {
         setDisable(true);
     }
 
-    // ==================== 拖拽与上传按钮 ====================
+    // ==================== 拖拽支持 ====================
 
     private void setupDragAndDrop() {
-        // 拖拽外部文件到列表 → 上传
+        // --- 拖拽外部文件到列表 → 上传 ---
         fileListView.setOnDragOver(e -> {
             if (e.getDragboard().hasFiles() && currentFM != null && !transferring) {
                 e.acceptTransferModes(TransferMode.COPY);
@@ -171,19 +214,136 @@ public class FileBrowserView extends VBox {
             e.consume();
         });
 
-        // 拖拽列表文件 → 触发下载
+        // --- 选中条目时后台预下载，拖拽时直接用缓存 ---
+        // 这是关键修复：必须始终在 onDragDetected 中调用 startDragAndDrop()，
+        // 否则 JavaFX 的拖拽手势识别状态会损坏，导致后续拖拽无响应。
+        fileListView.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
+            // 选中变化时清理旧缓存并启动新预下载
+            clearDragCache();
+            if (sel == null || currentFM == null) return;
+
+            final FileEntry toCache = sel;
+            dragPreloadThread = new Thread(() -> {
+                Path tmp = null;
+                try {
+                    tmp = Files.createTempDirectory("rt_drag_");
+                    if (toCache.isDirectory()) {
+                        currentFM.downloadDirectory(toCache.getFullPath(), tmp);
+                    } else {
+                        currentFM.downloadFile(toCache.getFullPath(), tmp.resolve(toCache.getName()));
+                    }
+                    dragCacheDir = tmp;
+                    dragCacheName = toCache.getName();
+                    // 更新状态栏提示
+                    Platform.runLater(() -> {
+                        if (onStatusChange != null) {
+                            onStatusChange.accept("就绪: " + toCache.getName() + " (可直接拖拽)");
+                        }
+                    });
+                } catch (Exception ex) {
+                    if (tmp != null) deleteDirRecursive(tmp);
+                }
+            }, "Drag-Preload");
+            dragPreloadThread.setDaemon(true);
+            dragPreloadThread.start();
+        });
+
+        // --- 拖拽到本地：始终调用 startDragAndDrop() ---
         fileListView.setOnDragDetected(e -> {
             FileEntry selected = fileListView.getSelectionModel().getSelectedItem();
-            if (selected != null && currentFM != null && !transferring) {
-                Dragboard db = fileListView.startDragAndDrop(TransferMode.COPY);
-                ClipboardContent content = new ClipboardContent();
-                content.putString(selected.getFullPath());
-                db.setContent(content);
-                // 拖拽远程文件 → 弹出保存对话框下载
-                downloadWithProgress(selected.getFullPath());
-                e.consume();
+            if (selected == null || currentFM == null || transferring) {
+                return; // 不消费事件，让手势自然结束
             }
+
+            if (fileBrowserCtxMenu != null) {
+                fileBrowserCtxMenu.hide();
+            }
+
+            Path dataDir = null;
+            boolean fromCache = false;
+
+            // 优先使用预下载缓存
+            if (dragCacheDir != null && Files.exists(dragCacheDir)
+                    && selected.getName().equals(dragCacheName)) {
+                dataDir = dragCacheDir;
+                fromCache = true;
+            } else {
+                // 缓存未就绪 → 同步下载（显示等待光标，通常很快因为预下载已有先发优势）
+                getScene().setCursor(javafx.scene.Cursor.WAIT);
+                try {
+                    Path tmp = Files.createTempDirectory("rt_drag_");
+                    if (selected.isDirectory()) {
+                        currentFM.downloadDirectory(selected.getFullPath(), tmp);
+                    } else {
+                        currentFM.downloadFile(selected.getFullPath(), tmp.resolve(selected.getName()));
+                    }
+                    dataDir = tmp;
+                } catch (Exception ex) {
+                    showError("下载失败: " + ex.getMessage());
+                    getScene().setCursor(javafx.scene.Cursor.DEFAULT);
+                    e.consume();
+                    return;
+                } finally {
+                    getScene().setCursor(javafx.scene.Cursor.DEFAULT);
+                }
+            }
+
+            // 收集拖拽文件列表
+            List<File> dragFiles = new ArrayList<>();
+            if (dataDir != null && Files.exists(dataDir)) {
+                try (var stream = Files.walk(dataDir)) {
+                    stream.filter(p -> !Files.isDirectory(p))
+                          .forEach(p -> dragFiles.add(p.toFile()));
+                } catch (Exception ignored) {}
+            }
+
+            // ★ 关键：必须调用 startDragAndDrop，否则拖拽手势损坏
+            Dragboard db = fileListView.startDragAndDrop(TransferMode.COPY);
+            ClipboardContent content = new ClipboardContent();
+            if (!dragFiles.isEmpty()) {
+                content.putFiles(dragFiles);
+            }
+            content.putString(selected.getFullPath());
+            db.setContent(content);
+
+            // 拖拽完成后清理
+            final Path toClean = dataDir;
+            final boolean wasCache = fromCache;
+            fileListView.setOnDragDone(dragEv -> {
+                if (wasCache) {
+                    dragCacheDir = null;
+                    dragCacheName = null;
+                }
+                new Thread(() -> {
+                    try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
+                    deleteDirRecursive(toClean);
+                }, "Clean-Drag").start();
+            });
+
+            e.consume();
         });
+    }
+
+    /** 清理预下载缓存 */
+    private void clearDragCache() {
+        if (dragPreloadThread != null && dragPreloadThread.isAlive()) {
+            dragPreloadThread.interrupt();
+        }
+        dragCacheName = null;
+        Path old = dragCacheDir;
+        dragCacheDir = null;
+        if (old != null) {
+            new Thread(() -> deleteDirRecursive(old), "Del-Cache").start();
+        }
+    }
+
+    /** 递归删除目录 */
+    private static void deleteDirRecursive(Path dir) {
+        if (dir == null || !Files.exists(dir)) return;
+        try (var stream = Files.walk(dir)) {
+            stream.sorted(java.util.Comparator.reverseOrder())
+                  .forEach(p -> { try { Files.deleteIfExists(p); } catch (Exception ignored) {} });
+        } catch (Exception ignored) {}
     }
 
     /** 上传按钮处理 */
@@ -458,7 +618,7 @@ public class FileBrowserView extends VBox {
 
         // 下载
         MenuItem dlItem = new MenuItem("下载");
-        dlItem.setOnAction(e -> downloadItem(path));
+        dlItem.setOnAction(e -> downloadItem(path, isDir));
         menu.getItems().add(dlItem);
 
         // 上传（目标为选中项的父目录或选中项目录）
@@ -658,32 +818,42 @@ public class FileBrowserView extends VBox {
         });
     }
 
-    private void downloadItem(String path) {
-        downloadWithProgress(path);
+    private void downloadItem(String path, boolean isDir) {
+        downloadWithProgress(path, isDir);
     }
 
-    /** 带进度条的下载 */
-    private void downloadWithProgress(String remotePath) {
+    /** 带进度条的下载（支持文件和目录） */
+    private void downloadWithProgress(String remotePath, boolean isDir) {
         if (currentFM == null || transferring) return;
         javafx.stage.DirectoryChooser chooser = new javafx.stage.DirectoryChooser();
         chooser.setTitle("选择下载位置");
         File dir = chooser.showDialog(getScene().getWindow());
         if (dir == null) return;
 
-        String fileName = new File(remotePath).getName();
+        String name = new File(remotePath).getName();
         transferring = true;
-        showProgress("下载: " + fileName);
+        showProgress("下载: " + name);
 
         runAsync(() -> {
             try {
-                Path localPath = dir.toPath().resolve(fileName);
-                currentFM.downloadFile(remotePath, localPath, pct ->
-                    Platform.runLater(() -> setProgress(pct, "下载 " + fileName))
-                );
+                Path localTarget;
+                if (isDir) {
+                    currentFM.downloadDirectory(remotePath, dir.toPath(), pct ->
+                        Platform.runLater(() -> setProgress(pct, "下载 " + name))
+                    );
+                    localTarget = dir.toPath().resolve(name);
+                } else {
+                    Path localPath = dir.toPath().resolve(name);
+                    currentFM.downloadFile(remotePath, localPath, pct ->
+                        Platform.runLater(() -> setProgress(pct, "下载 " + name))
+                    );
+                    localTarget = localPath;
+                }
+                final Path target = localTarget;
                 Platform.runLater(() -> {
                     hideProgress();
                     transferring = false;
-                    if (onStatusChange != null) onStatusChange.accept("已下载到: " + localPath);
+                    if (onStatusChange != null) onStatusChange.accept("已下载到: " + target);
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
@@ -713,6 +883,16 @@ public class FileBrowserView extends VBox {
     }
 
     // ==================== 工具方法 ====================
+
+    /** 递归检查 target 节点是否在 ancestor 的子树中 */
+    private static boolean isInsideNode(javafx.scene.Node target, javafx.scene.Node ancestor) {
+        javafx.scene.Node current = target;
+        while (current != null) {
+            if (current == ancestor) return true;
+            current = current.getParent();
+        }
+        return false;
+    }
 
     private String getParentFromPath(String path) {
         if ("/".equals(path)) return "/";

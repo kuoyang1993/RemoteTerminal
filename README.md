@@ -33,14 +33,14 @@ chmod +x build-linux.sh run.sh
 
 ```bash
 # 通用压缩包安装（无需 root）
-tar -xzf RemoteTerminal-1.0.0-linux-x64.tar.gz
+tar -xzf RemoteTerminal-1.1.0-linux-x64.tar.gz
 ./RemoteTerminal/bin/RemoteTerminal
 
 # Debian/Ubuntu 安装
-sudo dpkg -i remoteterminal_1.0.0_amd64.deb
+sudo dpkg -i remoteterminal_1.1.0_amd64.deb
 
 # Fedora/RHEL 安装
-sudo rpm -i remoteterminal-1.0.0.x86_64.rpm
+sudo rpm -i remoteterminal-1.1.0.x86_64.rpm
 ```
 
 ## 开发运行（Linux）

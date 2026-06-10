@@ -200,7 +200,7 @@ if (Test-Path $DIST_DIR) { Remove-Item -Recurse -Force $DIST_DIR }
 
 $jpackageArgs = @(
     "--name",             "RemoteTerminal",
-    "--app-version",      "1.0.0",
+    "--app-version",      "1.1.0",
     "--vendor",           "RemoteTerminal",
     "--description",      "SSH Remote Terminal Client",
     "--input",            $STAGING_DIR,
