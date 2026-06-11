@@ -6,6 +6,7 @@ target/
 lib/javafx-jmods-temp/
 # Log file
 *.log
+ssh.ico
 
 # BlueJ files
 *.ctxt
