@@ -59,3 +59,6 @@ chmod +x run.sh
 # 或直接运行
 .\build-installer.ps1
 ```
+
+## 图标声明
+本项目图标来自 [Flaticon](https://www.flaticon.com/free-icons/instagram-logo)，由 **Freepik** 设计，经 Flaticon 授权使用。
